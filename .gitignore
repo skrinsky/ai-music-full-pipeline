@@ -1,0 +1,13 @@
+data/
+runs/
+out_midis/
+manifests/
+*.mid
+*.wav
+*.aiff
+*.aif
+*.flac
+*.mp3
+__pycache__/
+*.py[cod]
+.venv/
