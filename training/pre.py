@@ -1,0 +1,964 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Event-stream preprocessing with canonical instrument labels and train-only augmentation.
+
+Instruments (canonical 6):
+  voxlead, voxharm (includes auxvox), guitar, other (renamed from synth, fallback),
+  bass, drums
+
+Augmentations (TRAIN ONLY):
+  • Pitch: ±1 semitone on melodic instruments (drums untouched)
+  • Velocity: ±10 additive (clipped to [1,127])
+
+Outputs
+-------
+DATA_FOLDER/
+  events_train.pkl         # {"sequences": [...], "aux": [...]}
+  events_val.pkl           # {"sequences": [...], "aux": [...]}
+  event_vocab.json
+  _samples/tokenized_000.mid ...
+  vocab_summary.txt
+
+Event order per note: TIME_SHIFT → BAR (optional) → INST → VEL → PITCH → DUR.
+BAR tokens encode (steps_per_bar, bar_position) pairs so mixed meters work.
+
+Aux targets ("polyphony instructor") are computed per 512-token window from note intervals:
+  • max_polyphony per instrument (6)
+  • mean_polyphony per instrument (6)
+  • overlap_ratio per instrument (6)  [union of note sounding time / window duration]
+  • chord stats for guitar & other: mean and max chord size on onset bins (4)
+  • pitch-class histogram (12) for non-drums (L1-normalized)
+
+Total aux_dim = 6 + 6 + 6 + 4 + 12 = 34
+"""
+
+import os
+import glob
+import json
+import random
+import pickle
+import argparse
+from typing import Dict, List, Tuple, Set, Optional
+
+import numpy as np
+import pretty_midi
+from collections import Counter
+
+# -------------- PATHS --------------
+MIDI_FOLDER   = "midi_songs5"
+DATA_FOLDER   = "data_events6"
+os.makedirs(DATA_FOLDER, exist_ok=True)
+SAMPLES_DIR   = os.path.join(DATA_FOLDER, "_samples")
+os.makedirs(SAMPLES_DIR, exist_ok=True)
+
+# -------------- CORE SETTINGS --------------
+INSTRUMENT_NAMES = ["voxlead", "voxharm", "guitar", "other", "bass", "drums"]
+NUM_INSTRUMENTS = len(INSTRUMENT_NAMES)
+DRUM_IDX  = INSTRUMENT_NAMES.index("drums")
+OTHER_IDX = INSTRUMENT_NAMES.index("other")
+GUITAR_IDX = INSTRUMENT_NAMES.index("guitar")
+
+# Windowing for LM training
+SEQ_LEN    = 512
+SEQ_STRIDE = 256
+
+# ----- DATA AUGMENTATION (TRAIN ONLY) -----
+AUG_TRANSPOSES = [-1, 1]      # semitone shifts for melodic instruments (drums not transposed)
+AUG_VEL_DELTAS = [-10, 10]    # additive velocity shifts for ALL instruments (clip to [1,127])
+AUG_ENABLE     = True
+
+
+# -------------- TRACK SELECTION --------------
+# Keep a fixed canonical instrument index space (size=6) for compatibility,
+# but allow selecting a subset of tracks to KEEP when building the dataset.
+# This affects which events are included (and thus what the model learns to generate).
+#
+# Canonical instruments:
+#   voxlead, voxharm, guitar, other, bass, drums
+#
+# Aliases accepted in --tracks:
+#   voxbg, bgvox, backingvox, auxvox  -> voxharm
+TRACK_ALIASES = {
+    "voxbg": "voxharm",
+    "bgvox": "voxharm",
+    "backingvox": "voxharm",
+    "auxvox": "voxharm",
+    "voxharm": "voxharm",
+    "voxlead": "voxlead",
+    "guitar": "guitar",
+    "other": "other",
+    "bass": "bass",
+    "drums": "drums",
+}
+
+def parse_tracks_arg(s: str) -> List[str]:
+    s = (s or "").strip().lower()
+    if (not s) or s in ("all", "*"):
+        return list(INSTRUMENT_NAMES)
+    parts = [p.strip().lower() for p in s.split(",") if p.strip()]
+    out = []
+    for p in parts:
+        canon = TRACK_ALIASES.get(p, None)
+        if canon is None:
+            raise ValueError(f"Unknown track '{p}'. Valid: {sorted(TRACK_ALIASES.keys())} or 'all'.")
+        if canon not in out:
+            out.append(canon)
+    return out
+
+# ---------- DRUM DIAGNOSTICS (optional) ----------
+GM_MIN, GM_MAX = 32, 81  # GM percussion nominal range
+
+def _is_drum_track(inst, name_keywords=None) -> bool:
+    if name_keywords is None:
+        name_keywords = (
+            "drum","kick","kik","bd","snare","sd","hat","hh",
+            "ride","crash","shaker","cymbal","toms","tom","perc","clap"
+        )
+    lname = (inst.name or "").lower()
+    return bool(getattr(inst, "is_drum", False) or any(k in lname for k in name_keywords))
+
+def diagnose_drum_midi_anomalies(midi_folder: str, strict_range_only: bool = True):
+    paths = sorted(
+        glob.glob(os.path.join(midi_folder, "*.mid")) +
+        glob.glob(os.path.join(midi_folder, "*.midi"))
+    )
+    results = {}
+    global_out = Counter()
+    total_files = len(paths)
+    flagged_files = 0
+
+    print(f"\n── Drum Diagnostics: scanning {total_files} files in '{midi_folder}' ──")
+    for p in paths:
+        try:
+            pm = pretty_midi.PrettyMIDI(p)
+        except Exception as e:
+            print(f"  [skip] {os.path.basename(p)}: {e}")
+            continue
+
+        drum_pitches = []
+        for inst in pm.instruments:
+            if _is_drum_track(inst):
+                drum_pitches.extend(int(n.pitch) for n in inst.notes)
+
+        if not drum_pitches:
+            continue
+
+        uniq = sorted({m for m in drum_pitches})
+        oob = sorted(m for m in uniq if (m < GM_MIN or m > GM_MAX))
+
+        if (not strict_range_only) or oob:
+            flagged_files += (1 if oob else 0)
+            for m in oob:
+                global_out[m] += 1
+            name = os.path.basename(p)
+            if oob:
+                print(f"  [non-GM range] {name}: out-of-range={oob} (min={min(uniq)}, max={max(uniq)})")
+            elif not strict_range_only:
+                print(f"  [drums ok]     {name}: range OK (min={min(uniq)}, max={max(uniq)})")
+
+        results[p] = {"out_of_range": oob, "all_drums": uniq, "counts": Counter(drum_pitches)}
+
+    print("\n── Summary ─────────────────────────────────")
+    print(f"Files scanned: {total_files}")
+    print(f"Files with out-of-range drum notes (<{GM_MIN} or >{GM_MAX}): {flagged_files}")
+    if global_out:
+        top = ", ".join(f"{m}:{c}" for m, c in global_out.most_common(12))
+        print(f"Most common offending pitches (MIDI): {top}")
+    else:
+        print("No out-of-range drum notes found.")
+    print("──────────────────────────────────────────\n")
+    return results
+# ---------- end DRUM DIAGNOSTICS ----------
+
+# -------------- GRID / BINS --------------
+BASE_SUBDIV = 4  # steps per quarter note group used for BAR positions
+TIME_SHIFT_QN_STEP = 1.0/24.0
+TIME_SHIFT_QN_MAX  = 8.0   # in quarter notes
+
+def make_duration_bins_qn(max_qn=8.0):
+    base = [1/24, 1/12, 1/8, 1/6, 1/4, 1/3, 3/8, 1/2, 2/3, 3/4, 1.0,
+            1.5, 2.0, 3.0, 4.0, 6.0, 8.0]
+    xs = sorted({x for x in base if 0 < x <= max_qn})
+    return xs
+DURATION_BINS_QN = make_duration_bins_qn()
+
+VELOCITY_BINS = list(range(0, 128, 16))  # 0,16,...,112
+
+BOS = "<BOS>"
+EOS = "<EOS>"
+
+# -------------- HELPERS: BAR GRID --------------
+def build_bar_grid(pm: pretty_midi.PrettyMIDI, base_subdiv=BASE_SUBDIV):
+    downbeats = pm.get_downbeats()
+    if len(downbeats) == 0:
+        beats = pm.get_beats()
+        if len(beats) < 2:
+            raise ValueError("Cannot infer bars (no downbeats or beats).")
+        downbeats = beats[::4]
+    db = np.asarray(downbeats, dtype=float)
+
+    if len(db) >= 2:
+        bar_durs = np.diff(db)
+        median_dur = float(np.median(bar_durs))
+    else:
+        median_dur = 2.0
+
+    ts_changes = sorted(pm.time_signature_changes, key=lambda ts: ts.time)
+    if not ts_changes:
+        ts_changes = [pretty_midi.containers.TimeSignature(4, 4, 0.0)]
+
+    def ts_at(time_sec: float):
+        idx = 0
+        for i, ts in enumerate(ts_changes):
+            if ts.time <= time_sec:
+                idx = i
+            else:
+                break
+        ts = ts_changes[idx]
+        return int(ts.numerator), int(ts.denominator)
+
+    bars = []
+    for i in range(len(db)):
+        s = db[i]
+        e = db[i+1] if i+1 < len(db) else db[i] + median_dur
+        numer, denom = ts_at(s)
+        steps = int(numer * (4.0/denom) * base_subdiv)
+        steps = max(1, steps)
+        bars.append((s, e, steps))
+
+    return db, bars
+
+def time_to_barpos(t_sec: float, bar_starts: np.ndarray, bars_meta: List[Tuple[float,float,int]]) -> Tuple[int,int]:
+    i = int(np.searchsorted(bar_starts, t_sec, side='right') - 1)
+    i = max(0, min(i, len(bars_meta)-1))
+    s, e, steps = bars_meta[i]
+    dur = max(e - s, 1e-9)
+    phase = (t_sec - s) / dur
+    pos = int(np.floor(np.clip(phase, 0.0, 0.999999) * steps)) % steps
+    return pos, steps
+
+# -------------- QUANTIZATION --------------
+def nearest_bin(x: float, bins: List[float]) -> float:
+    if not bins:
+        return 0.0
+    arr = np.asarray(bins, dtype=float)
+    idx = int(np.argmin(np.abs(arr - float(x))))
+    return float(arr[idx])
+
+def qn_between(a_sec: float, b_sec: float, tempo_bpm: float) -> float:
+    return (b_sec - a_sec) * tempo_bpm / 60.0
+
+def qn_to_sec(qn: float, tempo_bpm: float) -> float:
+    return qn * 60.0 / tempo_bpm
+
+# -------------- NOTE EXTRACTION / MAPPING --------------
+DRUM_KEYWORDS = ("drum","kick","kik","bd","snare","sd","hat","hh","ride","crash","shaker","cymbal","toms","tom","perc","clap")
+
+ALIAS_TO_CANON = {
+    "auxvox": "voxharm",
+    "voxbg":  "voxharm",
+    "bgvox":  "voxharm",
+    "backingvox": "voxharm",
+    "synth":  "other",
+}
+
+def map_name_to_slot(inst: pretty_midi.Instrument) -> int:
+    lname = (inst.name or "").lower()
+    # canonicalize common aliases first
+    for alias, canon in ALIAS_TO_CANON.items():
+        if alias in lname:
+            lname = lname.replace(alias, canon)
+
+    # Drums
+    if inst.is_drum or any(k in lname for k in DRUM_KEYWORDS):
+        return DRUM_IDX
+
+    # Vox lead
+    if "voxlead" in lname or ("lead" in lname and "vox" in lname):
+        return INSTRUMENT_NAMES.index("voxlead")
+
+    # Vox harm (includes auxvox/backing)
+    if ("voxharm" in lname) or ("harmony" in lname and "vox" in lname):
+        return INSTRUMENT_NAMES.index("voxharm")
+
+    # Guitar
+    if "guitar" in lname or "gtr" in lname:
+        return INSTRUMENT_NAMES.index("guitar")
+
+    # Bass
+    if "bass" in lname:
+        return INSTRUMENT_NAMES.index("bass")
+
+    # Everything else → other
+    return OTHER_IDX
+
+def extract_multitrack_events(path: str):
+    """
+    Returns:
+      events: list of (start_sec, inst_idx, midi_pitch, velocity, dur_qn)
+      tempo_bpm
+      bar_starts, bars_meta
+    """
+    pm = pretty_midi.PrettyMIDI(path)
+    tc = pm.get_tempo_changes()
+    tempo = float(tc[1][0]) if tc[1].size > 0 else 120.0
+
+    bar_starts, bars_meta = build_bar_grid(pm, BASE_SUBDIV)
+
+    ev = []
+    for inst in pm.instruments:
+        slot = map_name_to_slot(inst)
+        for n in inst.notes:
+            start = float(n.start)
+            dur_qn = qn_between(n.start, n.end, tempo)
+            ev.append((start, slot, int(n.pitch), int(n.velocity), float(dur_qn)))
+
+    ev.sort(key=lambda x: x[0])
+    return ev, tempo, bar_starts, bars_meta
+
+# -------------- AUGMENTATION HELPERS --------------
+def is_drum_slot(inst_idx: int) -> bool:
+    return inst_idx == DRUM_IDX
+
+def clip_midi_pitch(p: int) -> int:
+    return max(0, min(127, int(p)))
+
+def clip_velocity(v: int) -> int:
+    return max(1, min(127, int(v)))
+
+def augment_events_additive(
+    ev: List[Tuple[float,int,int,int,float]],
+    semitone_shift: int,
+    vel_delta: int
+) -> List[Tuple[float,int,int,int,float]]:
+    """
+    Return a new list:
+      • melodic pitches shifted by semitone_shift (drums untouched)
+      • velocities shifted by vel_delta (all instruments), clipped to [1,127]
+    """
+    out = []
+    for (start_s, inst, midi, vel, dur_qn) in ev:
+        midi_out = midi if is_drum_slot(inst) else clip_midi_pitch(midi + semitone_shift)
+        v = clip_velocity(vel + vel_delta)
+        out.append((start_s, inst, midi_out, v, dur_qn))
+    return out
+
+# -------------- VOCAB BUILD --------------
+def build_pitch_maps(all_events):
+    """
+    Build per-family pitch maps:
+      general (melodic instruments), drums (all percussive pitches).
+    """
+    gen: Set[int] = set()
+    drums: Set[int] = set()
+    for _, inst, midi, _, _ in all_events:
+        if inst == DRUM_IDX:
+            drums.add(midi)
+        else:
+            gen.add(midi)
+
+    maps = {
+        "general": {p: i+1 for i, p in enumerate(sorted(gen))},   # 0 reserved
+        "drums":   {p: i+1 for i, p in enumerate(sorted(drums))}, # 0 reserved
+    }
+    return maps
+
+def gather_bar_pairs(all_bars_meta: List[List[Tuple[float,float,int]]]) -> List[Tuple[int,int]]:
+    pairs: Set[Tuple[int,int]] = set()
+    for bars in all_bars_meta:
+        for (_, _, steps) in bars:
+            for pos in range(steps):
+                pairs.add((steps, pos))
+    return sorted(pairs)
+
+def quantize_velocity(v: int, bins=VELOCITY_BINS) -> int:
+    idx = int(np.argmin([abs(v - b) for b in bins]))
+    return idx
+
+def quantize_duration_qn(d_qn: float) -> int:
+    val = nearest_bin(d_qn, DURATION_BINS_QN)
+    return int(DURATION_BINS_QN.index(val))
+
+# -------------- EVENT VOCAB LAYOUT --------------
+def build_event_vocab(pitch_maps, bar_pairs: List[Tuple[int,int]]):
+    vocab = {}
+    idx = 0
+    vocab["PAD"] = {"start": idx, "size": 1}; idx += 1
+    vocab["BOS"] = {"start": idx, "size": 1}; idx += 1
+    vocab["EOS"] = {"start": idx, "size": 1}; idx += 1
+
+    bar_pair_to_local = {pair: i for i, pair in enumerate(bar_pairs)}
+    vocab["BAR"] = {"start": idx, "size": len(bar_pairs)}; idx += len(bar_pairs)
+
+    n_time = int(round(TIME_SHIFT_QN_MAX / TIME_SHIFT_QN_STEP))
+    n_time = max(1, n_time)
+    vocab["TIME_SHIFT"] = {"start": idx, "size": n_time}; idx += n_time
+
+    vocab["INST"] = {"start": idx, "size": NUM_INSTRUMENTS}; idx += NUM_INSTRUMENTS
+    vocab["VEL"]  = {"start": idx, "size": len(VELOCITY_BINS)}; idx += len(VELOCITY_BINS)
+    vocab["DUR"]  = {"start": idx, "size": len(DURATION_BINS_QN)}; idx += len(DURATION_BINS_QN)
+
+    gen_sz   = len(pitch_maps["general"]) + 1
+    drums_sz = len(pitch_maps["drums"]) + 1
+    vocab["PITCH_GENERAL"] = {"start": idx, "size": gen_sz};   idx += gen_sz
+    vocab["PITCH_DRUMS"]   = {"start": idx, "size": drums_sz}; idx += drums_sz
+
+    pitch_space_for_inst = {}
+    for i in range(NUM_INSTRUMENTS):
+        pitch_space_for_inst[str(i)] = "PITCH_DRUMS" if i == DRUM_IDX else "PITCH_GENERAL"
+
+    vocab_meta = {
+        "type": "event_vocab_v1_canonical6_aug_aux34",
+        "base_subdiv": BASE_SUBDIV,
+        "time_shift_qn_step": TIME_SHIFT_QN_STEP,
+        "time_shift_qn_max": TIME_SHIFT_QN_MAX,
+        "velocity_bins": VELOCITY_BINS,
+        "duration_bins_qn": DURATION_BINS_QN,
+        "pitch_maps": pitch_maps,
+        "pitch_space_for_inst": pitch_space_for_inst,
+        "bar_pairs": bar_pairs,
+        "bar_pair_to_local": {f"{s}:{p}": i for (s,p), i in bar_pair_to_local.items()},
+        "layout": vocab,
+        "instrument_names": INSTRUMENT_NAMES,
+        "drum_index": DRUM_IDX,
+        "aux": {
+            "enabled": True,
+            "aux_dim": 34,
+            "fields": [
+                "max_polyphony[6]",
+                "mean_polyphony[6]",
+                "overlap_ratio[6]",
+                "chord_mean_guitar, chord_max_guitar, chord_mean_other, chord_max_other",
+                "pitch_class_histogram[12] (non-drums, normalized)"
+            ]
+        }
+    }
+    return vocab_meta
+
+# -------------- ENCODER / DECODER --------------
+def tok_of(vocab, group, local_idx):
+    return vocab["layout"][group]["start"] + int(local_idx)
+
+def encode_bar_pair(vocab, steps: int, pos: int) -> Optional[int]:
+    key = f"{steps}:{pos}"
+    local = vocab["bar_pair_to_local"].get(key, None)
+    if local is None:
+        return None
+    return tok_of(vocab, "BAR", local)
+
+def encode_time_shift_qn(vocab, delta_qn: float) -> List[int]:
+    out = []
+    step = float(vocab["time_shift_qn_step"])
+    max_local = vocab["layout"]["TIME_SHIFT"]["size"]
+    steps = int(round(delta_qn / step))
+    if steps <= 0:
+        return out
+    while steps > 0:
+        take = min(steps, max_local)
+        out.append(tok_of(vocab, "TIME_SHIFT", take - 1))  # local 0 → 1 step
+        steps -= take
+    return out
+
+def encode_inst(vocab, inst_idx: int) -> int:
+    return tok_of(vocab, "INST", inst_idx)
+
+def encode_vel(vocab, v: int) -> int:
+    return tok_of(vocab, "VEL", quantize_velocity(v))
+
+def encode_dur(vocab, d_qn: float) -> int:
+    return tok_of(vocab, "DUR", quantize_duration_qn(d_qn))
+
+def encode_pitch(vocab, inst_idx: int, midi_pitch: int) -> Optional[int]:
+    space_name = vocab["pitch_space_for_inst"][str(inst_idx)]
+    pmaps = vocab["pitch_maps"]["general"] if space_name == "PITCH_GENERAL" else vocab["pitch_maps"]["drums"]
+    local = pmaps.get(int(midi_pitch), None)
+    if local is None:
+        return None
+    return tok_of(vocab, space_name, local)
+
+def decode_to_midi(seq: List[int], vocab: dict, out_path: str, tempo_bpm=120.0):
+    layout = vocab["layout"]
+    inv_token = {}
+    for g, spec in layout.items():
+        s, n = spec["start"], spec["size"]
+        for j in range(n):
+            inv_token[s + j] = (g, j)
+
+    inv_pitch = {}
+    for short_name, mp in vocab["pitch_maps"].items():
+        inv = {int(v): int(k) for k, v in mp.items()}
+        inv_pitch[short_name] = inv
+        inv_pitch["PITCH_" + short_name.upper()] = inv
+
+    pitch_space_for_inst = vocab["pitch_space_for_inst"]
+    DRUM_INSTS = {int(i_str) for i_str, sp in pitch_space_for_inst.items() if "DRUM" in str(sp).upper()}
+
+    def is_drum_inst(i: int) -> bool:
+        return i in DRUM_INSTS
+
+    inst_names = vocab.get("instrument_names") or [f"inst_{i}" for i in range(layout["INST"]["size"])]
+
+    pm = pretty_midi.PrettyMIDI(resolution=960)
+    tracks = []
+    for i, nm in enumerate(inst_names):
+        inst = pretty_midi.Instrument(program=0, name=nm)
+        inst.is_drum = is_drum_inst(i)
+        tracks.append(inst)
+
+    cur_time_qn = 0.0
+    cur_inst = 0
+    cur_vel  = 64
+    cur_dur  = 0.25
+
+    def _qn_to_sec(qn: float, tempo: float) -> float:
+        return qn * 60.0 / tempo
+
+    for t in seq:
+        pair = inv_token.get(t)
+        if pair is None:
+            continue
+        group, local = pair
+
+        if group in ("BOS", "EOS"):
+            continue
+        elif group == "TIME_SHIFT":
+            steps = local + 1
+            cur_time_qn += steps * float(vocab["time_shift_qn_step"])
+        elif group == "BAR":
+            pass
+        elif group == "INST":
+            cur_inst = int(local)
+        elif group == "VEL":
+            vbin = vocab["velocity_bins"][local] if "velocity_bins" in vocab else (local * 16)
+            cur_vel = int(max(1, min(127, vbin)))
+        elif group == "DUR":
+            cur_dur = float(vocab["duration_bins_qn"][local])
+        elif group.startswith("PITCH"):
+            space = vocab["pitch_space_for_inst"].get(str(cur_inst), "PITCH_GENERAL")
+            inv_map = inv_pitch.get(space) or (inv_pitch.get("drums") if "DRUM" in space else inv_pitch.get("general"))
+            if not inv_map:
+                continue
+            midi = inv_map.get(int(local))
+            if midi is None:
+                continue
+
+            start = _qn_to_sec(cur_time_qn, tempo_bpm)
+            end   = _qn_to_sec(cur_time_qn + cur_dur, tempo_bpm)
+            note  = pretty_midi.Note(velocity=int(cur_vel), pitch=int(midi), start=start, end=end)
+            if 0 <= cur_inst < len(tracks):
+                tracks[cur_inst].notes.append(note)
+
+    pm.instruments.extend(tracks)
+    pm.write(out_path)
+
+# -------------- TOKENIZER --------------
+def tokenize_song(ev, tempo_bpm, bar_starts, bars_meta, vocab):
+    tokens = [vocab["layout"]["BOS"]["start"]]
+    last_time_qn = 0.0
+    last_bar_key = None
+
+    for (start_s, inst, midi, vel, dur_qn) in ev:
+        cur_time_qn = qn_between(0.0, start_s, tempo_bpm)
+        delta_qn = max(0.0, cur_time_qn - last_time_qn)
+        tokens += encode_time_shift_qn(vocab, delta_qn)
+        last_time_qn = cur_time_qn
+
+        pos, steps = time_to_barpos(start_s, bar_starts, bars_meta)
+        btok = encode_bar_pair(vocab, steps, pos)
+        key = (steps, pos)
+        if btok is not None and key != last_bar_key:
+            tokens.append(btok)
+            last_bar_key = key
+
+        tokens.append(encode_inst(vocab, inst))
+        tokens.append(encode_vel(vocab, vel))
+        ptok = encode_pitch(vocab, inst, midi)
+        if ptok is None:
+            continue
+        tokens.append(ptok)
+        tokens.append(encode_dur(vocab, dur_qn))
+
+    tokens.append(vocab["layout"]["EOS"]["start"])
+    return tokens
+
+# -------------- AUX: WINDOW TIME BOUNDS FROM TOKENS --------------
+def token_time_qn_prefix(tokens: List[int], vocab: dict) -> np.ndarray:
+    """
+    prefix[i] = time_qn before consuming tokens[i], for i in [0..L]
+    prefix[L] = time_qn after consuming all tokens
+    """
+    layout = vocab["layout"]
+    ts_start = layout["TIME_SHIFT"]["start"]
+    ts_end   = ts_start + layout["TIME_SHIFT"]["size"]
+    step_qn  = float(vocab["time_shift_qn_step"])
+
+    L = len(tokens)
+    prefix = np.zeros(L + 1, dtype=np.float32)
+    t = 0.0
+    for i, tok in enumerate(tokens):
+        prefix[i] = t
+        if ts_start <= tok < ts_end:
+            local = tok - ts_start
+            t += (local + 1) * step_qn
+    prefix[L] = t
+    return prefix
+
+def window_slices_with_time(tokens: List[int], vocab: dict, max_len=SEQ_LEN, stride=SEQ_STRIDE):
+    """
+    Yields (window_tokens, t0_qn, t1_qn).
+    """
+    pref = token_time_qn_prefix(tokens, vocab)
+    L = len(tokens)
+
+    if L <= max_len:
+        yield tokens, float(pref[0]), float(pref[L])
+        return
+
+    start = 0
+    while start < L:
+        end = min(L, start + max_len)
+        window = tokens[start:end]
+        if len(window) < 4:
+            break
+        t0 = float(pref[start])
+        t1 = float(pref[end])
+        yield window, t0, t1
+        if end >= L:
+            break
+        start += stride
+
+# -------------- AUX: NOTE INTERVALS + FEATURES --------------
+def events_to_intervals_qn(ev, tempo_bpm: float):
+    """
+    From ev list (start_sec, inst, pitch, vel, dur_qn) produce intervals in QN:
+      (start_qn, end_qn, inst, pitch)
+    """
+    out = []
+    for (start_s, inst, midi, vel, dur_qn) in ev:
+        start_qn = qn_between(0.0, start_s, tempo_bpm)
+        end_qn   = start_qn + float(dur_qn)
+        out.append((float(start_qn), float(end_qn), int(inst), int(midi)))
+    out.sort(key=lambda x: x[0])
+    return out
+
+def compute_aux_for_window(intervals,
+                           t0_qn: float,
+                           t1_qn: float,
+                           num_instruments: int,
+                           drum_idx: int,
+                           guitar_idx: int,
+                           other_idx: int,
+                           onset_bin_qn: float = 1.0/24.0) -> np.ndarray:
+    """
+    Returns aux vector float32 shape (34,).
+    """
+    if t1_qn <= t0_qn:
+        t1_qn = t0_qn + 1e-3
+    win_dur = t1_qn - t0_qn
+
+    segs = [[] for _ in range(num_instruments)]
+    pitches_in_win = []
+
+    for (s, e, inst, pitch) in intervals:
+        if e <= t0_qn:
+            continue
+        if s >= t1_qn:
+            break
+        ss = max(s, t0_qn)
+        ee = min(e, t1_qn)
+        if ee > ss:
+            segs[inst].append((ss, ee))
+            if inst != drum_idx:
+                pitches_in_win.append(pitch)
+
+    def union_len(segments: List[Tuple[float,float]]) -> float:
+        if not segments:
+            return 0.0
+        segments = sorted(segments)
+        total = 0.0
+        cs, ce = segments[0]
+        for s, e in segments[1:]:
+            if s <= ce:
+                ce = max(ce, e)
+            else:
+                total += (ce - cs)
+                cs, ce = s, e
+        total += (ce - cs)
+        return total
+
+    def poly_stats(segments: List[Tuple[float,float]]) -> Tuple[float, float]:
+        if not segments:
+            return 0.0, 0.0
+        events = []
+        for s, e in segments:
+            events.append((s, +1))
+            events.append((e, -1))
+        events.sort()
+        cur = 0
+        last_t = events[0][0]
+        area = 0.0
+        mx = 0
+        for t, d in events:
+            dt = t - last_t
+            if dt > 0:
+                area += cur * dt
+            cur += d
+            mx = max(mx, cur)
+            last_t = t
+        mean = area / win_dur
+        return float(mx), float(mean)
+
+    max_poly = np.zeros(num_instruments, dtype=np.float32)
+    mean_poly = np.zeros(num_instruments, dtype=np.float32)
+    overlap = np.zeros(num_instruments, dtype=np.float32)
+
+    for i in range(num_instruments):
+        segments = segs[i]
+        overlap[i] = float(union_len(segments) / win_dur) if win_dur > 0 else 0.0
+        mx, mn = poly_stats(segments)
+        max_poly[i] = mx
+        mean_poly[i] = mn
+
+    def chord_stats_for_inst(inst_idx: int) -> Tuple[float, float]:
+        # bin onsets to avoid float mismatch
+        ons = []
+        for (s, e, inst, pitch) in intervals:
+            if inst != inst_idx:
+                continue
+            if s < t0_qn or s >= t1_qn:
+                continue
+            b = int(round((s - t0_qn) / onset_bin_qn))
+            ons.append(b)
+        if not ons:
+            return 0.0, 0.0
+        c = Counter(ons)
+        sizes = np.array(list(c.values()), dtype=np.float32)
+        return float(sizes.mean()), float(sizes.max())
+
+    mean_ch_g, max_ch_g = chord_stats_for_inst(guitar_idx)
+    mean_ch_o, max_ch_o = chord_stats_for_inst(other_idx)
+
+    pc = np.zeros(12, dtype=np.float32)
+    for p in pitches_in_win:
+        pc[int(p) % 12] += 1.0
+    s = float(pc.sum())
+    if s > 0:
+        pc /= s
+
+    aux = np.concatenate([
+        max_poly, mean_poly, overlap,
+        np.array([mean_ch_g, max_ch_g, mean_ch_o, max_ch_o], dtype=np.float32),
+        pc
+    ], axis=0).astype(np.float32)
+
+    return aux
+
+# -------------- WINDOWING (legacy, not used now) --------------
+def window_sequences(tokens: List[int], max_len=SEQ_LEN, stride=SEQ_STRIDE) -> List[List[int]]:
+    out = []
+    if len(tokens) <= max_len:
+        out.append(tokens)
+        return out
+    start = 0
+    while start < len(tokens):
+        window = tokens[start:start+max_len]
+        if len(window) < 4:
+            break
+        out.append(window)
+        if start + max_len >= len(tokens):
+            break
+        start += stride
+    return out
+
+# -------------- MAIN PIPELINE --------------
+def main():
+    global MIDI_FOLDER, DATA_FOLDER, SAMPLES_DIR, AUG_ENABLE
+    ap = argparse.ArgumentParser("preES4: preprocess multitrack MIDI into factored event-stream windows.")
+    ap.add_argument("--midi_folder", default=MIDI_FOLDER, help="Folder containing per-song multi-track MIDI files.")
+    ap.add_argument("--data_folder", default=DATA_FOLDER, help="Output folder for events_train/val + vocab.")
+    ap.add_argument("--tracks", default="all", help="Comma-separated subset of tracks to keep (default: all). Examples: drums,bass,guitar  |  drums,bass  |  all. Aliases: voxbg/bgvox/backingvox/auxvox -> voxharm.")
+    ap.add_argument("--no-aug", action="store_true", help="Disable train-time augmentation (transpose/velocity).")
+    ap.add_argument("--diagnose-drums", action="store_true", help="Run a quick scan for out-of-range drum pitches and exit.")
+    args = ap.parse_args()
+
+    if args.diagnose_drums:
+        diagnose_drum_midi_anomalies(args.midi_folder, strict_range_only=True)
+        return
+
+    # Apply CLI overrides
+    MIDI_FOLDER = args.midi_folder
+    DATA_FOLDER = args.data_folder
+    AUG_ENABLE = False if args.no_aug else AUG_ENABLE
+
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    SAMPLES_DIR = os.path.join(DATA_FOLDER, "_samples")
+    os.makedirs(SAMPLES_DIR, exist_ok=True)
+
+    selected_tracks = parse_tracks_arg(args.tracks)
+    allowed_inst_idx = {INSTRUMENT_NAMES.index(t) for t in selected_tracks}
+    print(f"Keeping tracks: {selected_tracks} (indices={sorted(allowed_inst_idx)})")
+
+    # 1) Collect & split
+    paths = sorted(glob.glob(os.path.join(MIDI_FOLDER, "*.mid"))) + \
+            sorted(glob.glob(os.path.join(MIDI_FOLDER, "*.midi")))
+    if not paths:
+        raise RuntimeError(f"No MIDI files found in '{MIDI_FOLDER}'.")
+
+    random.seed(42)
+    random.shuffle(paths)
+    n_train = int(0.8 * len(paths))
+    train_paths, val_paths = paths[:n_train], paths[n_train:]
+
+    # 2) Gather base events + bar metadata
+    song_meta: Dict[str, Tuple[list, float, np.ndarray, list]] = {}
+    all_bars_meta = []
+    for p in paths:
+        try:
+            ev, tempo, bar_starts, bars_meta = extract_multitrack_events(p)
+            # Filter to selected tracks (keep canonical index space)
+            ev = [e for e in ev if e[1] in allowed_inst_idx]
+            if not ev:
+                raise RuntimeError('No events remain after track filtering.')
+        except Exception as e:
+            print(f"Skipping {os.path.basename(p)}: {e}")
+            continue
+        song_meta[p] = (ev, tempo, bar_starts, bars_meta)
+        all_bars_meta.append(bars_meta)
+
+    if not any(song_meta[p][0] for p in song_meta):
+        raise RuntimeError("No events extracted. Check your MIDI folder & mapping heuristics.")
+
+    # 3) Build vocab from: VAL (base) + TRAIN (base + augmented)
+    events_for_vocab = []
+
+    # add val base
+    for p in val_paths:
+        if p in song_meta:
+            events_for_vocab.extend(song_meta[p][0])
+
+    # add train base + aug
+    for p in train_paths:
+        if p not in song_meta:
+            continue
+        ev, _, _, _ = song_meta[p]
+        events_for_vocab.extend(ev)
+        if AUG_ENABLE:
+            for s in AUG_TRANSPOSES:
+                for dv in AUG_VEL_DELTAS:
+                    ev_aug = augment_events_additive(ev, semitone_shift=s, vel_delta=dv)
+                    events_for_vocab.extend(ev_aug)
+
+    # 4) Build vocab
+    bar_pairs  = gather_bar_pairs(all_bars_meta)
+    pitch_maps = build_pitch_maps(events_for_vocab)
+    vocab      = build_event_vocab(pitch_maps, bar_pairs)
+    vocab["tracks"] = {
+        "selected": selected_tracks,
+        "allowed_inst_indices": sorted(list(allowed_inst_idx)),
+        "canonical_instrument_names": INSTRUMENT_NAMES,
+    }
+
+    # 5) Tokenize & window (train = base + aug; val = base only), and compute aux per window.
+    def tokenize_group_with_aux(group_paths: List[str], do_aug: bool):
+        seqs: List[List[int]] = []
+        auxs: List[np.ndarray] = []
+        for p in group_paths:
+            if p not in song_meta:
+                continue
+            ev, tempo, bar_starts, bars_meta = song_meta[p]
+
+            def add_one(ev_local):
+                toks = tokenize_song(ev_local, tempo, bar_starts, bars_meta, vocab)
+                intervals = events_to_intervals_qn(ev_local, tempo)
+                for window, t0, t1 in window_slices_with_time(toks, vocab, SEQ_LEN, SEQ_STRIDE):
+                    seqs.append(window)
+                    auxs.append(compute_aux_for_window(
+                        intervals, t0, t1,
+                        num_instruments=NUM_INSTRUMENTS,
+                        drum_idx=DRUM_IDX,
+                        guitar_idx=GUITAR_IDX,
+                        other_idx=OTHER_IDX
+                    ))
+
+            # base
+            add_one(ev)
+
+            # augmented (train only)
+            if do_aug and AUG_ENABLE:
+                for s in AUG_TRANSPOSES:
+                    for dv in AUG_VEL_DELTAS:
+                        ev_aug = augment_events_additive(ev, semitone_shift=s, vel_delta=dv)
+                        add_one(ev_aug)
+
+        return seqs, auxs
+
+    train_seqs, train_aux = tokenize_group_with_aux(train_paths, do_aug=True)
+    val_seqs,   val_aux   = tokenize_group_with_aux(val_paths, do_aug=False)
+
+    # 6) Save
+    with open(os.path.join(DATA_FOLDER, "events_train.pkl"), "wb") as f:
+        pickle.dump({"sequences": train_seqs, "aux": train_aux}, f)
+    with open(os.path.join(DATA_FOLDER, "events_val.pkl"), "wb") as f:
+        pickle.dump({"sequences": val_seqs, "aux": val_aux}, f)
+    with open(os.path.join(DATA_FOLDER, "event_vocab.json"), "w") as f:
+        json.dump(vocab, f, indent=2)
+
+    # 7) Round-trip a few samples to MIDI (for sanity)
+    for i in range(min(3, len(train_seqs))):
+        outp = os.path.join(SAMPLES_DIR, f"tokenized_{i:03d}.mid")
+        decode_to_midi(train_seqs[i], vocab, outp, tempo_bpm=120.0)
+
+    # 8) Report
+    layout = vocab["layout"]
+    total_vocab = max(v["start"] + v["size"] for v in layout.values())
+    meters = sorted({s for (s, _) in vocab["bar_pairs"]})
+    sizes = {
+        "TOTAL_VOCAB": total_vocab,
+        "BAR_pairs": layout["BAR"]["size"],
+        "TIME_SHIFT": layout["TIME_SHIFT"]["size"],
+        "INST": layout["INST"]["size"],
+        "VEL": layout["VEL"]["size"],
+        "DUR": layout["DUR"]["size"],
+        "PITCH_GENERAL": layout["PITCH_GENERAL"]["size"],
+        "PITCH_DRUMS": layout["PITCH_DRUMS"]["size"],
+        "meters_steps_per_bar": meters,
+        "time_shift_qn_step": vocab["time_shift_qn_step"],
+        "instruments": INSTRUMENT_NAMES,
+        "selected_tracks": selected_tracks,
+        "drum_index": DRUM_IDX,
+        "aux_dim": vocab["aux"]["aux_dim"] if "aux" in vocab else 0,
+        "train_windows": len(train_seqs),
+        "val_windows": len(val_seqs),
+    }
+
+    print("\n── Vocab Summary ───────────────────────────")
+    for k, v in sizes.items():
+        print(f"{k:>22}: {v}")
+    print("────────────────────────────────────────────")
+    print(f"Wrote {os.path.join(DATA_FOLDER, 'events_train.pkl')}  (seqs={len(train_seqs)}, aux={len(train_aux)})")
+    print(f"Wrote {os.path.join(DATA_FOLDER, 'events_val.pkl')}    (seqs={len(val_seqs)}, aux={len(val_aux)})")
+    print(f"Wrote {os.path.join(DATA_FOLDER, 'event_vocab.json')}")
+    print(f"Round-trip MIDIs in {SAMPLES_DIR}")
+
+    # quick aux sanity
+    if train_aux:
+        a0 = train_aux[0]
+        print("\n── Aux Sanity ──────────────────────────────")
+        print(f"aux[0] shape: {np.asarray(a0).shape}  dtype={np.asarray(a0).dtype}")
+        max_poly = np.asarray(a0[:NUM_INSTRUMENTS])
+        overlap = np.asarray(a0[2*NUM_INSTRUMENTS:3*NUM_INSTRUMENTS])
+        pc = np.asarray(a0[-12:])
+        print(f"max_polyphony[0]: {max_poly}")
+        print(f"overlap_ratio[0]: {overlap}")
+        print(f"pitchclass sum (should be 0 or 1): {pc.sum():.3f}")
+        print("────────────────────────────────────────────")
+
+    with open(os.path.join(DATA_FOLDER, "vocab_summary.txt"), "w") as f:
+        f.write("Event Vocab Summary\n")
+        for k, v in sizes.items():
+            f.write(f"{k}: {v}\n")
+
+if __name__ == "__main__":
+    main()
