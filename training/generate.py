@@ -30,14 +30,16 @@ def prune_midi_tracks(midi_path: str, tracks_csv: str | None):
     pm.write(midi_path)
 
 def set_gm_programs(midi_path: str):
-    """
-    Set GM program numbers based on instrument.name so GM players don't default to piano.
-    pretty_midi uses 0-based GM programs.
+    """Set GM program numbers based on instrument name so GM players pick
+    appropriate sounds.  pretty_midi uses 0-based GM programs.
+
+    Note: Logic Pro 12+ defaults to GM Device tracks on MIDI import.
+    Use Option-drag to import as Software Instrument tracks instead.
     """
     GM_BY_NAME = {
         "bass": 33,     # Electric Bass (finger)
         "guitar": 27,   # Electric Guitar (clean)
-        "other": 80,    # Lead 1 (square) - adjust if you want
+        "other": 80,    # Lead 1 (square)
         "voxlead": 52,  # Choir Aahs
         "voxharm": 54,  # Synth Voice
     }
