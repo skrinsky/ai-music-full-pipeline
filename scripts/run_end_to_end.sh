@@ -126,7 +126,7 @@ python "$ROOT_DIR/training/train.py" "${TRAIN_ARGS[@]}"
 GEN_ARGS=(
   --ckpt "$CKPT_PATH"
   --vocab_json "$EVENTS_DIR/event_vocab.json"
-  --out "$GEN_OUT"
+  --out_midi "$GEN_OUT"
   --device "$DEVICE"
 )
 if [[ -n "$TRACKS" ]]; then

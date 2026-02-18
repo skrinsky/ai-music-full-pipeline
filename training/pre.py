@@ -805,6 +805,8 @@ def main():
             sorted(glob.glob(os.path.join(MIDI_FOLDER, "*.midi")))
     if not paths:
         raise RuntimeError(f"No MIDI files found in '{MIDI_FOLDER}'.")
+    if len(paths) < 2:
+        raise RuntimeError(f"Need at least 2 MIDI files for train/val split, got {len(paths)} in '{MIDI_FOLDER}'.")
 
     random.seed(42)
     random.shuffle(paths)
