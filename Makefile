@@ -1,24 +1,24 @@
-.PHONY: setup setup-force venv run clean
+.PHONY: help setup setup-force venv run clean
+.DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
 ACTIVATE := $(VENV_DIR)/bin/activate
 
-setup:
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
+
+setup: ## Create venv via uv (Python 3.10)
 	bash scripts/setup_venv.sh
 
-# re-run installs even if venv already exists (setup script already handles this, but this is a clear "do it again")
-setup-force:
+setup-force: ## Re-run venv setup (force reinstall)
 	PYTHON_BIN=$${PYTHON_BIN:-python3.10} bash scripts/setup_venv.sh
 
-# convenience: print how to activate
-venv:
+venv: ## Print venv activation command
 	@echo "To activate:"
 	@echo "  source $(ACTIVATE)"
 
-# convenience: run end-to-end (pass ARGS="--audio-glob ... --tracks ...")
-run:
+run: ## Run end-to-end pipeline (ARGS="--tracks drums,bass")
 	bash scripts/run_end_to_end.sh $(ARGS)
 
-# optional cleanup target (does NOT delete your data/raw files; just removes venv + runs)
-clean:
+clean: ## Remove venv + runs (keeps data/raw)
 	rm -rf $(VENV_DIR) runs
