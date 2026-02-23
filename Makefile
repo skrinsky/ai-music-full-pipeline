@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-generate generate
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-generate bg generate gen
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -6,7 +6,7 @@ ACTIVATE := $(VENV_DIR)/bin/activate
 PYTHON := $(VENV_DIR)/bin/python
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+( [a-zA-Z_-]+)*:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
 
 setup: ## Create venv via uv (Python 3.10)
 	bash scripts/setup_venv.sh
@@ -61,7 +61,7 @@ blues-train: $(BLUES_EVENTS)/events_train.pkl ## Train on preprocessed blues eve
 $(BLUES_EVENTS)/events_train.pkl: data/blues_midi/.fetched
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS)
 
-bg blues-generate: $(BLUES_CKPT) ## Generate blues MIDI from trained model
+blues-generate bg: $(BLUES_CKPT) ## Generate blues MIDI from trained model
 	$(PYTHON) training/generate.py \
 	  --ckpt $(BLUES_CKPT) \
 	  --vocab_json $(BLUES_EVENTS)/event_vocab.json \
@@ -73,7 +73,7 @@ bg blues-generate: $(BLUES_CKPT) ## Generate blues MIDI from trained model
 LATEST_CKPT = $(shell ls -t runs/checkpoints/*.pt 2>/dev/null | head -1)
 LATEST_VOCAB = $(shell ls -t runs/*/event_vocab.json 2>/dev/null | head -1)
 
-gen generate: ## Generate from latest checkpoint (ARGS="--seed_midi foo.mid --seed_bars 4")
+generate gen: ## Generate from latest checkpoint (ARGS="--seed_midi foo.mid --seed_bars 4")
 	@test -n "$(LATEST_CKPT)" || { echo "ERROR: no checkpoint found in runs/checkpoints/"; exit 1; }
 	@test -n "$(LATEST_VOCAB)" || { echo "ERROR: no event_vocab.json found in runs/"; exit 1; }
 	@echo "Using checkpoint: $(LATEST_CKPT)"
