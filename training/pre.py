@@ -473,7 +473,8 @@ def encode_dur(vocab, d_qn: float) -> int:
 def encode_pitch(vocab, inst_idx: int, midi_pitch: int) -> Optional[int]:
     space_name = vocab["pitch_space_for_inst"][str(inst_idx)]
     pmaps = vocab["pitch_maps"]["general"] if space_name == "PITCH_GENERAL" else vocab["pitch_maps"]["drums"]
-    local = pmaps.get(int(midi_pitch), None)
+    # JSON round-trips keys as strings, so try both int and str lookups
+    local = pmaps.get(int(midi_pitch)) or pmaps.get(str(midi_pitch))
     if local is None:
         return None
     return tok_of(vocab, space_name, local)

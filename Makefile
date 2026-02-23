@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-generate
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-generate generate
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -61,9 +61,25 @@ blues-train: $(BLUES_EVENTS)/events_train.pkl ## Train on preprocessed blues eve
 $(BLUES_EVENTS)/events_train.pkl: data/blues_midi/.fetched
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS)
 
-blues-generate: $(BLUES_CKPT) ## Generate blues MIDI from trained model
+bg blues-generate: $(BLUES_CKPT) ## Generate blues MIDI from trained model
 	$(PYTHON) training/generate.py \
 	  --ckpt $(BLUES_CKPT) \
 	  --vocab_json $(BLUES_EVENTS)/event_vocab.json \
 	  --out_midi runs/generated/blues_out.mid \
+	  --device auto $(ARGS)
+
+# --- Generate from latest checkpoint (any pipeline) ---
+
+LATEST_CKPT = $(shell ls -t runs/checkpoints/*.pt 2>/dev/null | head -1)
+LATEST_VOCAB = $(shell ls -t runs/*/event_vocab.json 2>/dev/null | head -1)
+
+gen generate: ## Generate from latest checkpoint (ARGS="--seed_midi foo.mid --seed_bars 4")
+	@test -n "$(LATEST_CKPT)" || { echo "ERROR: no checkpoint found in runs/checkpoints/"; exit 1; }
+	@test -n "$(LATEST_VOCAB)" || { echo "ERROR: no event_vocab.json found in runs/"; exit 1; }
+	@echo "Using checkpoint: $(LATEST_CKPT)"
+	@echo "Using vocab:      $(LATEST_VOCAB)"
+	$(PYTHON) training/generate.py \
+	  --ckpt "$(LATEST_CKPT)" \
+	  --vocab_json "$(LATEST_VOCAB)" \
+	  --out_midi runs/generated/out.mid \
 	  --device auto $(ARGS)

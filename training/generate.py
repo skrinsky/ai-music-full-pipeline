@@ -131,6 +131,10 @@ def get_args():
                     help="How much better (relative) triplet must fit to switch (smaller = switches more).")
 
     ap.add_argument("--seed", type=int, default=None)
+
+    # ===== MIDI seed (prompt) =====
+    ap.add_argument("--seed_midi", default="", help="Path to a MIDI file to use as the opening prompt. The file is tokenized and prepended to the generation sequence.")
+    ap.add_argument("--seed_bars", type=int, default=0, help="Limit seed MIDI to the first N bars (0 = use entire file).")
     return ap.parse_args()
 
 # =================== Model ===================
@@ -290,6 +294,76 @@ def fit_error(delta_steps: int, step: int) -> float:
     nearest = nearest_multiple(delta_steps, step)
     return abs(delta_steps - nearest) / float(step)
 
+# =================== Seed MIDI ===================
+
+def tokenize_seed_midi(midi_path: str, vocab: dict, max_bars: int = 0) -> list[int]:
+    """Tokenize a MIDI file into event tokens using the training vocab.
+
+    Returns token list *without* BOS/EOS so the caller can splice it
+    into the generation sequence.
+    """
+    # Reuse the same sys.path setup as load_decoder
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    for p in [root, here]:
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+    from pre import extract_multitrack_events, tokenize_song
+
+    ev, tempo, bar_starts, bars_meta = extract_multitrack_events(midi_path)
+    if not ev:
+        raise ValueError(f"Seed MIDI {midi_path} produced zero events")
+
+    # Optionally truncate to first N bars
+    if max_bars > 0 and len(bar_starts) > max_bars:
+        cutoff_sec = float(bar_starts[max_bars])
+        ev = [(s, i, m, v, d) for (s, i, m, v, d) in ev if s < cutoff_sec]
+        if not ev:
+            raise ValueError(f"Seed MIDI has no events in the first {max_bars} bars")
+
+    tokens = tokenize_song(ev, tempo, bar_starts, bars_meta, vocab)
+    # Strip BOS and EOS — caller adds BOS and generation continues from here
+    bos = vocab["layout"]["BOS"]["start"]
+    eos = vocab["layout"]["EOS"]["start"]
+    tokens = [t for t in tokens if t != bos and t != eos]
+    return tokens
+
+
+def infer_phase_from_tokens(tokens: list[int], layout: dict, type_names: list[str]) -> tuple[str, int | None]:
+    """Walk a token sequence and return the grammar phase + last_inst
+    that the generation loop should resume from."""
+    # Build reverse lookup: global_id → type_name
+    id_to_type: dict[int, str] = {}
+    for tname in type_names:
+        spec = layout.get(tname)
+        if spec is None:
+            continue
+        for local in range(spec["size"]):
+            id_to_type[spec["start"] + local] = tname
+
+    phase = "TIME"
+    last_inst = None
+    inst_start = layout.get("INST", {}).get("start", 0)
+
+    for tok in tokens:
+        tname = id_to_type.get(tok)
+        if tname is None:
+            continue
+        if tname in ("TIME_SHIFT", "BAR"):
+            phase = "TIME"
+        elif tname == "INST":
+            last_inst = tok - inst_start
+            phase = "VEL"
+        elif tname == "VEL":
+            phase = "PITCH"
+        elif tname.startswith("PITCH"):
+            phase = "DUR"
+        elif tname == "DUR":
+            phase = "TIME"
+
+    return phase, last_inst
+
+
 # =================== Generation ===================
 @torch.no_grad()
 def generate(args):
@@ -416,12 +490,23 @@ def generate(args):
             return [maybe_idx("DUR")] if has("DUR") else list(range(len(type_names)))
         return [maybe_idx("TIME_SHIFT")] if has("TIME_SHIFT") else list(range(len(type_names)))
 
-    # state
-    seq = [BOS_ID]
-    phase = "TIME"
-    last_inst = None
+    # state — optionally seed from a MIDI file
+    if args.seed_midi:
+        seed_tokens = tokenize_seed_midi(args.seed_midi, vocab, max_bars=args.seed_bars)
+        seq = [BOS_ID] + seed_tokens
+        phase, last_inst = infer_phase_from_tokens(seed_tokens, layout, type_names)
+        # count notes already in the seed
+        notes_placed = sum(1 for t in seed_tokens if any(
+            layout[n]["start"] <= t < layout[n]["start"] + layout[n]["size"]
+            for n in type_names if n.startswith("PITCH")
+        ))
+        print(f"Seed MIDI: {args.seed_midi} → {len(seed_tokens)} tokens, {notes_placed} notes, resuming at phase={phase}")
+    else:
+        seq = [BOS_ID]
+        phase = "TIME"
+        last_inst = None
+        notes_placed = 0
     inst_streak = 0
-    notes_placed = 0
     since_note_tokens = 0
 
     num_instruments = layout.get("INST", {}).get("size", 16)
@@ -584,6 +669,8 @@ def generate(args):
         "device": device,
         "out_midi": args.out_midi,
         "sequence_len": len(seq),
+        "seed_midi": args.seed_midi or None,
+        "seed_bars": args.seed_bars if args.seed_midi else None,
         "note": "TIME_SHIFT snapped to adaptive straight/triplet grid in 1/24-qn steps."
     }
 
