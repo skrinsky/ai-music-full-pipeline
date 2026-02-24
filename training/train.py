@@ -124,18 +124,20 @@ ALPHA_VALUE     = 0.8
 
 # Aux (polyphony instructor) head
 AUX_ENABLED     = True
-AUX_DIM_DEFAULT = 34
+AUX_DIM_DEFAULT = 36
 AUX_LOSS_WEIGHT = 0.05          # weight relative to token loss
 AUX_HUBER_DELTA = 1.0           # robust to occasional big outliers
 
 # Aux weighting inside aux vector (optional but recommended)
-# aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12)]
+# aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12), swing(1), blues(1)] = 36
 AUX_WEIGHTS = {
     "max_poly":   1.0,
     "mean_poly":  1.0,
     "overlap":    2.0,   # overlap ratio is in [0,1], often smaller gradients
     "chords":     1.0,
     "pc_hist":    1.0,
+    "swing":      2.0,   # emphasize shuffle
+    "blues":      2.0,   # emphasize blues scale adherence
 }
 
 SEED = 42
@@ -252,17 +254,20 @@ class PositionalEmbedding(nn.Module):
 
 def _aux_weight_vector(aux_dim: int) -> torch.Tensor:
     """
-    aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12)] = 34
+    aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12), swing(1), blues(1)] = 36
     """
-    if aux_dim != 34:
+    if aux_dim != 36:
+        # fallback for other sizes
         return torch.ones(aux_dim, dtype=torch.float32)
 
-    w = torch.ones(34, dtype=torch.float32)
+    w = torch.ones(36, dtype=torch.float32)
     w[0:6] = AUX_WEIGHTS["max_poly"]
     w[6:12] = AUX_WEIGHTS["mean_poly"]
     w[12:18] = AUX_WEIGHTS["overlap"]
     w[18:22] = AUX_WEIGHTS["chords"]
     w[22:34] = AUX_WEIGHTS["pc_hist"]
+    w[34] = AUX_WEIGHTS["swing"]
+    w[35] = AUX_WEIGHTS["blues"]
     return w
 
 class FactorizedESModel(nn.Module):

@@ -53,7 +53,7 @@ blues-browse: data/blues_midi/.fetched ## Browse + play blues MIDIs (tkinter GUI
 	$(PYTHON) scripts/midi_browser.py --folder $(BLUES_MIDI) $(ARGS)
 
 blues-preprocess: data/blues_midi/.fetched ## Preprocess blues MIDIs → event tokens
-	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS) $(ARGS)
+	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS) --blues_only $(ARGS)
 
 blues-train: $(BLUES_EVENTS)/events_train.pkl ## Train on preprocessed blues events
 	$(PYTHON) training/train.py \

@@ -274,12 +274,14 @@ def _slot_from_gm_program(prog: int) -> Optional[int]:
 
     Returns None for programs we don't recognise — caller falls through to OTHER_IDX.
     """
-    if 24 <= prog <= 31:   return GUITAR_IDX     # guitar family
+    if 0 <= prog <= 7:     return OTHER_IDX       # piano
+    if 16 <= prog <= 20:   return OTHER_IDX       # organ family (Hammond, etc.)
+    if prog == 22:         return OTHER_IDX       # harmonica (very common in blues)
+    if 24 <= prog <= 31:   return GUITAR_IDX      # guitar family
     if 32 <= prog <= 39:   return BASS_IDX        # bass family
     if prog == 52:         return VOXLEAD_IDX     # choir aahs → lead vox
     if 53 <= prog <= 54:   return VOXHARM_IDX     # voice oohs / synth voice
-    # Everything below → "other" (piano, strings, brass, reed, synth lead …)
-    if 0 <= prog <= 7:     return OTHER_IDX       # piano
+    # Fallback mappings
     if 48 <= prog <= 51:   return OTHER_IDX       # strings ensemble
     if prog == 55:         return OTHER_IDX       # orchestra hit
     if 56 <= prog <= 63:   return OTHER_IDX       # brass
@@ -439,7 +441,7 @@ def build_event_vocab(pitch_maps, bar_pairs: List[Tuple[int,int]]):
         pitch_space_for_inst[str(i)] = "PITCH_DRUMS" if i == DRUM_IDX else "PITCH_GENERAL"
 
     vocab_meta = {
-        "type": "event_vocab_v1_canonical6_aug_aux34",
+        "type": "event_vocab_v1_canonical6_aug_aux36_blues",
         "base_subdiv": BASE_SUBDIV,
         "time_shift_qn_step": TIME_SHIFT_QN_STEP,
         "time_shift_qn_max": TIME_SHIFT_QN_MAX,
@@ -454,13 +456,15 @@ def build_event_vocab(pitch_maps, bar_pairs: List[Tuple[int,int]]):
         "drum_index": DRUM_IDX,
         "aux": {
             "enabled": True,
-            "aux_dim": 34,
+            "aux_dim": 36,
             "fields": [
                 "max_polyphony[6]",
                 "mean_polyphony[6]",
                 "overlap_ratio[6]",
                 "chord_mean_guitar, chord_max_guitar, chord_mean_other, chord_max_other",
-                "pitch_class_histogram[12] (non-drums, normalized)"
+                "pitch_class_histogram[12] (non-drums, normalized)",
+                "swing_score[1] (0=straight, 1=triplet-shuffle)",
+                "blues_scale_score[1] (0=none, 1=all in blues scale)"
             ]
         }
     }
@@ -682,7 +686,11 @@ def compute_aux_for_window(intervals,
                            other_idx: int,
                            onset_bin_qn: float = 1.0/24.0) -> np.ndarray:
     """
-    Returns aux vector float32 shape (34,).
+    Returns aux vector float32 shape (36,).
+    Now includes:
+      - standard (34)
+      - swing_score (1)
+      - blues_scale_score (1)
     """
     if t1_qn <= t0_qn:
         t1_qn = t0_qn + 1e-3
@@ -690,6 +698,7 @@ def compute_aux_for_window(intervals,
 
     segs = [[] for _ in range(num_instruments)]
     pitches_in_win = []
+    onsets_qn = []
 
     for (s, e, inst, pitch) in intervals:
         if e <= t0_qn:
@@ -702,6 +711,8 @@ def compute_aux_for_window(intervals,
             segs[inst].append((ss, ee))
             if inst != drum_idx:
                 pitches_in_win.append(pitch)
+                if s >= t0_qn: # only count onsets that start in this window
+                    onsets_qn.append(s)
 
     def union_len(segments: List[Tuple[float,float]]) -> float:
         if not segments:
@@ -773,14 +784,18 @@ def compute_aux_for_window(intervals,
     pc = np.zeros(12, dtype=np.float32)
     for p in pitches_in_win:
         pc[int(p) % 12] += 1.0
-    s = float(pc.sum())
-    if s > 0:
-        pc /= s
+    s_pc = float(pc.sum())
+    pc_norm = (pc / s_pc) if s_pc > 0 else pc
+
+    # --- Swing & Blues Scale Scores (shared helpers) ---
+    swing_score = calculate_swing_score(onsets_qn)
+    blues_score = calculate_blues_scale_score(pitches_in_win)
 
     aux = np.concatenate([
         max_poly, mean_poly, overlap,
         np.array([mean_ch_g, max_ch_g, mean_ch_o, max_ch_o], dtype=np.float32),
-        pc
+        pc_norm,
+        np.array([swing_score, blues_score], dtype=np.float32)
     ], axis=0).astype(np.float32)
 
     return aux
@@ -925,6 +940,40 @@ def compact_vocab(
     return vocab
 
 
+def calculate_swing_score(onsets_qn: List[float]) -> float:
+    """Measure fraction of off-beat onsets that are closer to triplet (2/3) than straight (1/2)."""
+    off_beats = [o % 1.0 for o in onsets_qn if 0.25 <= (o % 1.0) <= 0.75]
+    if not off_beats:
+        return 0.0
+    # 0.5 is straight 8th, 0.666 is triplet 8th
+    triplet_hits = sum(1 for p in off_beats if abs(p - 0.666) < abs(p - 0.5))
+    return float(triplet_hits) / len(off_beats)
+
+def calculate_blues_scale_score(pitches: List[int]) -> float:
+    """Find most likely root from pitch-class histogram, then check adherence to blues scale."""
+    if not pitches:
+        return 0.0
+    pc = Counter(p % 12 for p in pitches)
+    # Most common pitch class as a candidate for the root (I)
+    root = pc.most_common(1)[0][0]
+    blues_intervals = {0, 3, 5, 6, 7, 10} # root, b3, 4, b5, 5, b7
+    blues_pcs = {(root + i) % 12 for i in blues_intervals}
+    on_scale = sum(pc[p] for p in blues_pcs)
+    return float(on_scale) / len(pitches)
+
+def is_track_bluesy(ev, tempo_bpm: float, min_scale_score: float = 0.60, min_swing_score: float = 0.50) -> bool:
+    """Quick check for bluesiness (swing or scale) to filter training data."""
+    if not ev:
+        return False
+    
+    pitches = [e[2] for e in ev if e[1] != DRUM_IDX]
+    scale_score = calculate_blues_scale_score(pitches)
+
+    onsets_qn = [qn_between(0.0, e[0], tempo_bpm) for e in ev]
+    swing_score = calculate_swing_score(onsets_qn)
+    
+    return (scale_score >= min_scale_score) or (swing_score >= min_swing_score)
+
 # -------------- MAIN PIPELINE --------------
 def main():
     global MIDI_FOLDER, DATA_FOLDER, SAMPLES_DIR, AUG_ENABLE
@@ -934,6 +983,7 @@ def main():
     ap.add_argument("--tracks", default="all", help="Comma-separated subset of tracks to keep (default: all). Examples: drums,bass,guitar  |  drums,bass  |  all. Aliases: voxbg/bgvox/backingvox/auxvox -> voxharm.")
     ap.add_argument("--no-aug", action="store_true", help="Disable train-time augmentation (transpose/velocity).")
     ap.add_argument("--diagnose-drums", action="store_true", help="Run a quick scan for out-of-range drum pitches and exit.")
+    ap.add_argument("--blues_only", action="store_true", help="Filter out songs that don't meet minimum blues criteria (blues scale adherence or swing).")
     args = ap.parse_args()
 
     if args.diagnose_drums:
@@ -963,12 +1013,14 @@ def main():
 
     random.seed(42)
     random.shuffle(paths)
+
     n_train = int(0.8 * len(paths))
     train_paths, val_paths = paths[:n_train], paths[n_train:]
 
     # 2) Gather base events + bar metadata
     song_meta: Dict[str, Tuple[list, float, np.ndarray, list]] = {}
     all_bars_meta = []
+    skipped_not_bluesy = 0
     for p in paths:
         try:
             ev, tempo, bar_starts, bars_meta = extract_multitrack_events(p)
@@ -976,11 +1028,20 @@ def main():
             ev = [e for e in ev if e[1] in allowed_inst_idx]
             if not ev:
                 raise RuntimeError('No events remain after track filtering.')
+            
+            # Optional: Blues Filter
+            if args.blues_only and not is_track_bluesy(ev, tempo):
+                skipped_not_bluesy += 1
+                continue
+                
         except Exception as e:
             print(f"Skipping {os.path.basename(p)}: {e}")
             continue
         song_meta[p] = (ev, tempo, bar_starts, bars_meta)
         all_bars_meta.append(bars_meta)
+
+    if skipped_not_bluesy > 0:
+        print(f"Filtered out {skipped_not_bluesy} songs for not meeting blues criteria (--blues_only).")
 
     if not any(song_meta[p][0] for p in song_meta):
         raise RuntimeError("No events extracted. Check your MIDI folder & mapping heuristics.")
@@ -1016,10 +1077,12 @@ def main():
     }
 
     # 5) Tokenize & window (train = base + aug; val = base only), and compute aux per window.
-    def tokenize_group_with_aux(group_paths: List[str], do_aug: bool):
+    def tokenize_group_with_aux(group_paths: List[str], do_aug: bool, split_name: str = "train"):
         seqs: List[List[int]] = []
         auxs: List[np.ndarray] = []
-        for p in group_paths:
+        for i, p in enumerate(group_paths):
+            if i % 10 == 0:
+                print(f"Tokenizing ({split_name}): {i}/{len(group_paths)} {os.path.basename(p)}")
             if p not in song_meta:
                 continue
             ev, tempo, bar_starts, bars_meta = song_meta[p]
@@ -1049,8 +1112,8 @@ def main():
 
         return seqs, auxs
 
-    train_seqs, train_aux = tokenize_group_with_aux(train_paths, do_aug=True)
-    val_seqs,   val_aux   = tokenize_group_with_aux(val_paths, do_aug=False)
+    train_seqs, train_aux = tokenize_group_with_aux(train_paths, do_aug=True, split_name="train")
+    val_seqs,   val_aux   = tokenize_group_with_aux(val_paths, do_aug=False, split_name="val")
 
     # 5b) Compact vocab — remove dead tokens, remap sequences in-place
     vocab = compact_vocab(train_seqs, val_seqs, vocab)
