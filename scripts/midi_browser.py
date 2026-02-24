@@ -28,9 +28,19 @@ from training.pre import INSTRUMENT_NAMES, map_name_to_slot
 # ── Fluidsynth config ───────────────────────────────────────────────
 FLUIDSYNTH_BIN = "/opt/homebrew/bin/fluidsynth"
 SOUNDFONT = (
-    "/opt/homebrew/Cellar/fluid-synth/2.5.2/"
-    "share/fluid-synth/sf2/VintageDreamsWaves-v2.sf2"
+    "/Library/Frameworks/CsoundLib64.framework/Versions/6.0/"
+    "Resources/Manual/examples/sf_GMbank.sf2"
 )
+
+# GM programs to use per canonical slot (override whatever the file has)
+SLOT_PROGRAM: dict[str, int] = {
+    "drums":   0,   # Standard Kit (on drum channel)
+    "bass":    33,  # Electric Bass (finger)
+    "guitar":  25,  # Acoustic Guitar (steel)
+    "other":   0,   # Acoustic Grand Piano
+    "voxlead": 52,  # Choir Aahs
+    "voxharm": 53,  # Voice Oohs
+}
 
 
 class MidiBrowser(tk.Tk):
@@ -251,26 +261,31 @@ class MidiBrowser(tk.Tk):
             self._stop()
             self._play()
 
-    def _make_solo_midi(self, pm: pretty_midi.PrettyMIDI, track_idx: int) -> str:
-        """Write a temp MIDI containing only the given track. Returns path."""
+    def _make_playback_midi(self, pm: pretty_midi.PrettyMIDI,
+                            solo_idx: Optional[int] = None) -> str:
+        """Write a temp MIDI with normalized GM programs. Optionally solo one track."""
         self._clean_tmp_solo()
-        solo = pretty_midi.PrettyMIDI(initial_tempo=pm.get_tempo_changes()[1][0]
-                                      if pm.get_tempo_changes()[1].size > 0
-                                      else 120.0)
-        # Copy time signature changes
+        tc = pm.get_tempo_changes()
+        tempo = float(tc[1][0]) if tc[1].size > 0 else 120.0
+        out = pretty_midi.PrettyMIDI(initial_tempo=tempo)
         for ts in pm.time_signature_changes:
-            solo.time_signature_changes.append(ts)
+            out.time_signature_changes.append(ts)
 
-        orig = pm.instruments[track_idx]
-        inst = pretty_midi.Instrument(program=orig.program, is_drum=orig.is_drum,
-                                      name=orig.name or "")
-        inst.notes = list(orig.notes)
-        inst.control_changes = list(orig.control_changes)
-        solo.instruments.append(inst)
+        for i, orig in enumerate(pm.instruments):
+            if solo_idx is not None and i != solo_idx:
+                continue
+            slot = INSTRUMENT_NAMES[map_name_to_slot(orig)]
+            prog = SLOT_PROGRAM.get(slot, orig.program)
+            is_drum = (slot == "drums")
+            inst = pretty_midi.Instrument(program=prog, is_drum=is_drum,
+                                          name=orig.name or "")
+            inst.notes = list(orig.notes)
+            inst.control_changes = list(orig.control_changes)
+            out.instruments.append(inst)
 
-        fd, path = tempfile.mkstemp(suffix=".mid", prefix="solo_")
+        fd, path = tempfile.mkstemp(suffix=".mid", prefix="play_")
         os.close(fd)
-        solo.write(path)
+        out.write(path)
         self._tmp_solo = path
         return path
 
@@ -290,16 +305,15 @@ class MidiBrowser(tk.Tk):
             self._play()
 
     def _play(self) -> None:
-        if self.current_idx < 0:
+        if self.current_idx < 0 or self.current_pm is None:
             return
         self._kill_proc()
 
-        if (self.solo_track_idx is not None
-                and self.current_pm is not None
-                and self.solo_track_idx < len(self.current_pm.instruments)):
-            path = self._make_solo_midi(self.current_pm, self.solo_track_idx)
-        else:
-            path = self.paths[self.current_idx]
+        solo = self.solo_track_idx if (
+            self.solo_track_idx is not None
+            and self.solo_track_idx < len(self.current_pm.instruments)
+        ) else None
+        path = self._make_playback_midi(self.current_pm, solo_idx=solo)
         try:
             self.proc = subprocess.Popen(
                 [FLUIDSYNTH_BIN, "-a", "coreaudio", "-n", "-i", SOUNDFONT, path],
