@@ -491,6 +491,57 @@ Training Results Analysis
 
   This applies to both full-mix and solo playback. The SLOT_PROGRAM dict at the top of the file is easy to tweak if you want different sounds.
 
+--
+
+⏺ Great reference ["Blues Model Diagnosis" above]. Looking at what's been done vs. what's left:
+
+  Already done (this session + prior):
+  - Problem 1: Fixed map_name_to_slot() with GM program fallback
+  - Problem 6: Augmentation widened to ±{1,3,5} semitones
+  - Problem 5: Aux weight reduced 0.20 → 0.05
+  - Tier 2 items: Dropout 0.12, label smoothing lowered, patience 25
+
+  Still open -- highest impact next:
+
+  1. Tier 1 generation fixes -- these are free, no retraining needed. Once your current training finishes, test with:
+  make gen ARGS="--temperature 0.65 --top_p 0.85 --drum_bonus 0 --max_notes_per_step 4"
+  1. You can experiment with these while the model trains.
+  2. Problem 2: Vocab compaction -- 67% dead tokens. The vocab is built from the data, but TIME_SHIFT has 192 slots (for QN_MAX=8.0) even though we
+  reduced QN_MAX to 4.0. That cuts TIME_SHIFT in half (96 slots). BAR bloat comes from rare meters. This requires reprocessing, so it's worth doing
+  before the next retrain cycle.
+  3. Grid snapping in generate.py -- currently distorts timing. Worth checking/disabling.
+
+  My recommendation: Let the current training run finish. Then:
+  - Test generation with the Tier 1 flag tweaks (instant, no cost)
+  - Browse/listen to results in the MIDI browser
+  - If quality is noticeably better but still has issues, tackle vocab compaction + grid snapping before the next retrain
+
+  Want me to dig into any of these while the training runs?
+
+---
+
+...
+
+  What was added -- A single function compact_vocab() (~90 lines) in training/pre.py:806-925, called at line 1056 after tokenization and before saving.
+
+  What it does:
+  1. Scans all train+val sequences to find which global tokens actually appear
+  2. Builds per-group old_local → new_local remappings (contiguous from 0)
+  3. Rebuilds layout with tight offsets, plus bar_pairs, velocity_bins, duration_bins_qn, and pitch_maps
+  4. Remaps every token in every sequence in-place
+  5. Prints a compaction report
+
+  Test results (no-aug, 996 blues MIDIs):
+  - BAR: 415 → 307 (removed 108 dead bar-position slots)
+  - PITCH_GENERAL: 119 → 118 (removed 1)
+  - PITCH_DRUMS: 84 → 83 (removed 1)
+  - Total: 748 → 638 (14.7% reduction)
+  - All 72,041 sequences pass range validation
+  - Round-trip MIDI samples generated successfully
+
+  The full augmented run (make blues-preprocess without --no-aug) will show even more compaction since TIME_SHIFT/VEL/DUR bins might also compact. You
+  can run that at your convenience -- it takes ~45+ minutes with 996 files × 12 augmentation variants.
+
 ------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------
 
