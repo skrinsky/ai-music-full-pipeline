@@ -98,7 +98,7 @@ VOCAB_JSON      = os.path.join(DATA_DIR, "event_vocab.json")
 SAVE_PATH       = "esFullSummer_aux.pt"
 
 # Model size (~1–1.5M params)
-D_MODEL=192; N_HEADS=6; N_LAYERS=4; FF_MULT=3; DROPOUT=0.22
+D_MODEL=192; N_HEADS=6; N_LAYERS=4; FF_MULT=3; DROPOUT=0.12
 
 # Training
 BATCH_SIZE      = 64
@@ -110,8 +110,8 @@ WEIGHT_DECAY    = 1e-2
 MAX_GRAD_NORM   = 1.0
 
 # Label smoothing
-LABEL_SMOOTH_TYPE   = 0.10   # for type classification
-LABEL_SMOOTH_VALUE  = 0.08   # default for value heads
+LABEL_SMOOTH_TYPE   = 0.05   # for type classification
+LABEL_SMOOTH_VALUE  = 0.04   # default for value heads
 LABEL_SMOOTH_PER_TYPE = {
     "PITCH_GENERAL": 0.02,
     "PITCH_DRUMS":   0.02,
@@ -125,7 +125,7 @@ ALPHA_VALUE     = 0.8
 # Aux (polyphony instructor) head
 AUX_ENABLED     = True
 AUX_DIM_DEFAULT = 34
-AUX_LOSS_WEIGHT = 0.20          # weight relative to token loss
+AUX_LOSS_WEIGHT = 0.05          # weight relative to token loss
 AUX_HUBER_DELTA = 1.0           # robust to occasional big outliers
 
 # Aux weighting inside aux vector (optional but recommended)
@@ -454,7 +454,7 @@ def main():
     ap.add_argument("--target_tpp", type=float, default=8.0, help="Target tokens-per-parameter for auto_scale (7–10 is a good range).")
     ap.add_argument("--max_d_model", type=int, default=256, help="Max d_model considered by auto_scale.")
     ap.add_argument("--min_params", type=int, default=100000, help="Minimum parameter budget when auto_scale is enabled.")
-    ap.add_argument("--patience", type=int, default=10, help="Early stop if val loss does not improve for this many epochs (0 disables).")
+    ap.add_argument("--patience", type=int, default=25, help="Early stop if val loss does not improve for this many epochs (0 disables).")
     ap.add_argument("--min_delta", type=float, default=1e-4, help="Minimum val-loss improvement to count as improvement (for patience reset).")
     ap.add_argument("--d_model", type=int, default=None, help="Manual override d_model (disables auto_scale if set).")
     ap.add_argument("--n_layers", type=int, default=None, help="Manual override number of Transformer layers (disables auto_scale if set).")

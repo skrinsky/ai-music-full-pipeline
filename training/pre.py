@@ -9,7 +9,7 @@ Instruments (canonical 6):
   bass, drums
 
 Augmentations (TRAIN ONLY):
-  • Pitch: ±1 semitone on melodic instruments (drums untouched)
+  • Pitch: ±{1,3,5} semitones on melodic instruments (drums untouched)
   • Velocity: ±10 additive (clipped to [1,127])
 
 Outputs
@@ -65,7 +65,7 @@ SEQ_LEN    = 512
 SEQ_STRIDE = 256
 
 # ----- DATA AUGMENTATION (TRAIN ONLY) -----
-AUG_TRANSPOSES = [-1, 1]      # semitone shifts for melodic instruments (drums not transposed)
+AUG_TRANSPOSES = [-5, -3, -1, 1, 3, 5]  # semitone shifts for melodic instruments (all common blues keys)
 AUG_VEL_DELTAS = [-10, 10]    # additive velocity shifts for ALL instruments (clip to [1,127])
 AUG_ENABLE     = True
 
@@ -175,7 +175,7 @@ def diagnose_drum_midi_anomalies(midi_folder: str, strict_range_only: bool = Tru
 # -------------- GRID / BINS --------------
 BASE_SUBDIV = 4  # steps per quarter note group used for BAR positions
 TIME_SHIFT_QN_STEP = 1.0/24.0
-TIME_SHIFT_QN_MAX  = 8.0   # in quarter notes
+TIME_SHIFT_QN_MAX  = 4.0   # in quarter notes (multi-token encoding handles longer gaps)
 
 def make_duration_bins_qn(max_qn=8.0):
     base = [1/24, 1/12, 1/8, 1/6, 1/4, 1/3, 3/8, 1/2, 2/3, 3/4, 1.0,
@@ -264,6 +264,29 @@ ALIAS_TO_CANON = {
     "synth":  "other",
 }
 
+VOXLEAD_IDX = INSTRUMENT_NAMES.index("voxlead")
+VOXHARM_IDX = INSTRUMENT_NAMES.index("voxharm")
+BASS_IDX    = INSTRUMENT_NAMES.index("bass")
+
+def _slot_from_gm_program(prog: int) -> Optional[int]:
+    """Map GM program number to canonical instrument slot.
+
+    Returns None for programs we don't recognise — caller falls through to OTHER_IDX.
+    """
+    if 24 <= prog <= 31:   return GUITAR_IDX     # guitar family
+    if 32 <= prog <= 39:   return BASS_IDX        # bass family
+    if prog == 52:         return VOXLEAD_IDX     # choir aahs → lead vox
+    if 53 <= prog <= 54:   return VOXHARM_IDX     # voice oohs / synth voice
+    # Everything below → "other" (piano, strings, brass, reed, synth lead …)
+    if 0 <= prog <= 7:     return OTHER_IDX       # piano
+    if 48 <= prog <= 51:   return OTHER_IDX       # strings ensemble
+    if prog == 55:         return OTHER_IDX       # orchestra hit
+    if 56 <= prog <= 63:   return OTHER_IDX       # brass
+    if 64 <= prog <= 71:   return OTHER_IDX       # reed
+    if 80 <= prog <= 87:   return OTHER_IDX       # synth lead
+    return None
+
+
 def map_name_to_slot(inst: pretty_midi.Instrument) -> int:
     lname = (inst.name or "").lower()
     # canonicalize common aliases first
@@ -277,19 +300,24 @@ def map_name_to_slot(inst: pretty_midi.Instrument) -> int:
 
     # Vox lead
     if "voxlead" in lname or ("lead" in lname and "vox" in lname):
-        return INSTRUMENT_NAMES.index("voxlead")
+        return VOXLEAD_IDX
 
     # Vox harm (includes auxvox/backing)
     if ("voxharm" in lname) or ("harmony" in lname and "vox" in lname):
-        return INSTRUMENT_NAMES.index("voxharm")
+        return VOXHARM_IDX
 
     # Guitar
     if "guitar" in lname or "gtr" in lname:
-        return INSTRUMENT_NAMES.index("guitar")
+        return GUITAR_IDX
 
     # Bass
     if "bass" in lname:
-        return INSTRUMENT_NAMES.index("bass")
+        return BASS_IDX
+
+    # GM program fallback (for files with empty/generic track names)
+    gm_slot = _slot_from_gm_program(inst.program)
+    if gm_slot is not None:
+        return gm_slot
 
     # Everything else → other
     return OTHER_IDX

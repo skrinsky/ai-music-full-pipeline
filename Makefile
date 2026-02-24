@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-generate bg generate gen
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-generate bg generate gen blues-audition blues-browse
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -46,6 +46,12 @@ data/blues_midi/.fetched:
 	$(PYTHON) scripts/fetch_gigamidi_blues.py --out_dir $(BLUES_MIDI)
 	@touch $@
 
+blues-audition: data/blues_midi/.fetched ## Audition blues MIDIs (stats/list/info/play)
+	$(PYTHON) scripts/audition_gigamidi.py stats --folder $(BLUES_MIDI) $(ARGS)
+
+blues-browse: data/blues_midi/.fetched ## Browse + play blues MIDIs (tkinter GUI)
+	$(PYTHON) scripts/midi_browser.py --folder $(BLUES_MIDI) $(ARGS)
+
 blues-preprocess: data/blues_midi/.fetched ## Preprocess blues MIDIs → event tokens
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS) $(ARGS)
 
@@ -83,3 +89,4 @@ generate gen: ## Generate from latest checkpoint (ARGS="--seed_midi foo.mid --se
 	  --vocab_json "$(LATEST_VOCAB)" \
 	  --out_midi runs/generated/out.mid \
 	  --device auto $(ARGS)
+	open runs/generated/out.mid
