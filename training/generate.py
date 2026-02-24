@@ -104,6 +104,8 @@ def get_args():
     ap.add_argument("--tracks", default="", help="Optional comma-separated subset of tracks to allow (overrides vocab_json). Examples: drums,bass | drums,bass,guitar | all. Aliases: voxbg/bgvox/backingvox/auxvox -> voxharm.")
 
     ap.add_argument("--max_inst_streak", type=int, default=8)
+    ap.add_argument("--max_notes_per_step", type=int, default=12,
+                    help="Max notes between TIME_SHIFT/BAR events before forcing a time advance.")
     ap.add_argument("--drum_bonus", type=float, default=0.4)
 
     # Make this a real toggle
@@ -349,8 +351,10 @@ def infer_phase_from_tokens(tokens: list[int], layout: dict, type_names: list[st
         tname = id_to_type.get(tok)
         if tname is None:
             continue
-        if tname in ("TIME_SHIFT", "BAR"):
-            phase = "TIME"
+        if tname == "TIME_SHIFT":
+            phase = "POST_TS"
+        elif tname == "BAR":
+            phase = "INST"
         elif tname == "INST":
             last_inst = tok - inst_start
             phase = "VEL"
@@ -469,9 +473,20 @@ def generate(args):
     print(f"Allowed tracks: {[canonical_names[i] for i in sorted(list(allowed_inst_set))]}")
 
     # grammar phases
-    def allowed_type_indices_for_phase(phase, last_inst):
+    #   TIME     = after DUR (or start): allow TIME_SHIFT, BAR, INST
+    #   POST_TS  = after TIME_SHIFT: allow BAR, INST (no consecutive TIME_SHIFT)
+    #   INST     = after BAR: allow INST only
+    def allowed_type_indices_for_phase(phase, last_inst, notes_this_step_=0):
         if phase == "TIME":
-            opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR"), maybe_idx("INST")]
+            if notes_this_step_ >= args.max_notes_per_step:
+                # Too many notes at this timestep — force time advance
+                opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR")]
+            else:
+                opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR"), maybe_idx("INST")]
+            return [i for i in opts if i is not None] or list(range(len(type_names)))
+        if phase == "POST_TS":
+            # After TIME_SHIFT: BAR (73%) or INST (27%) — never consecutive TIME_SHIFT
+            opts = [maybe_idx("BAR"), maybe_idx("INST")]
             return [i for i in opts if i is not None] or list(range(len(type_names)))
         if phase == "INST":
             return [maybe_idx("INST")] if has("INST") else list(range(len(type_names)))
@@ -508,6 +523,7 @@ def generate(args):
         notes_placed = 0
     inst_streak = 0
     since_note_tokens = 0
+    notes_this_step = 0          # notes placed since last TIME_SHIFT/BAR
 
     num_instruments = layout.get("INST", {}).get("size", 16)
     pitch_history = {i: deque(maxlen=args.pitch_hist_len) for i in range(num_instruments)}
@@ -525,7 +541,7 @@ def generate(args):
         type_logits, value_logits_list = model(ctx)
         tlog = type_logits[:, -1, :].squeeze(0)
 
-        allowed = allowed_type_indices_for_phase(phase, last_inst)
+        allowed = allowed_type_indices_for_phase(phase, last_inst, notes_this_step)
         masked = torch.full_like(tlog, -1e9)
         masked[allowed] = tlog[allowed]
         type_choice = sample_from_logits(masked, args.temperature, args.top_p)
@@ -592,8 +608,10 @@ def generate(args):
         seq.append(global_id)
 
         # transitions
-        if type_name in ("TIME_SHIFT", "BAR"):
-            phase = "TIME"; since_note_tokens += 1
+        if type_name == "TIME_SHIFT":
+            phase = "POST_TS"; since_note_tokens += 1; notes_this_step = 0
+        elif type_name == "BAR":
+            phase = "INST"; since_note_tokens += 1; notes_this_step = 0
         elif type_name == "INST":
             last_inst = int(val_local)
             inst_streak = inst_streak + 1 if last_inst is not None else 0
@@ -604,6 +622,7 @@ def generate(args):
             if last_inst is not None and last_inst != DRUM_IDX:
                 pitch_history[last_inst].append(int(val_local))
             phase = "DUR"; notes_placed += 1; since_note_tokens = 0
+            notes_this_step += 1
         elif type_name == "DUR":
             phase = "TIME"; since_note_tokens += 1
         else:
