@@ -40,6 +40,7 @@ import json
 import random
 import pickle
 import argparse
+import itertools
 from typing import Dict, List, Tuple, Set, Optional
 
 import numpy as np
@@ -801,6 +802,129 @@ def window_sequences(tokens: List[int], max_len=SEQ_LEN, stride=SEQ_STRIDE) -> L
         start += stride
     return out
 
+# -------------- VOCAB COMPACTION --------------
+def compact_vocab(
+    train_seqs: List[List[int]],
+    val_seqs: List[List[int]],
+    vocab: dict,
+) -> dict:
+    """Remove unused token values from vocab and remap all sequences in-place.
+
+    After the first tokenization pass, many (group, local_idx) slots are allocated
+    but never appear in any sequence.  This function:
+      1. Scans every sequence to find which global tokens are actually used.
+      2. Builds a per-group old_local → new_local remapping (contiguous from 0).
+      3. Rebuilds vocab metadata (layout, bar_pairs, bins, pitch_maps).
+      4. Remaps every token in every sequence in-place.
+    """
+    old_layout = vocab["layout"]
+
+    # -- Step 1: collect used global token IDs --
+    used_globals: Set[int] = set()
+    for seq in itertools.chain(train_seqs, val_seqs):
+        used_globals.update(seq)
+
+    # -- Step 2: per-group used locals & remapping --
+    COMPACT_GROUPS = ["BAR", "TIME_SHIFT", "VEL", "DUR", "PITCH_GENERAL", "PITCH_DRUMS"]
+    KEEP_GROUPS = ["PAD", "BOS", "EOS", "INST"]
+    GROUP_ORDER = ["PAD", "BOS", "EOS", "BAR", "TIME_SHIFT", "INST",
+                   "VEL", "DUR", "PITCH_GENERAL", "PITCH_DRUMS"]
+
+    old_to_new_local: Dict[str, Dict[int, int]] = {}
+    new_sizes: Dict[str, int] = {}
+
+    for group in COMPACT_GROUPS:
+        start, size = old_layout[group]["start"], old_layout[group]["size"]
+        used_locals = sorted(
+            local for local in range(size)
+            if (start + local) in used_globals
+        )
+        old_to_new_local[group] = {old: new for new, old in enumerate(used_locals)}
+        new_sizes[group] = len(used_locals)
+
+    for group in KEEP_GROUPS:
+        new_sizes[group] = old_layout[group]["size"]
+        old_to_new_local[group] = {i: i for i in range(old_layout[group]["size"])}
+
+    # -- Step 3: rebuild layout with sequential offsets --
+    new_layout: Dict[str, dict] = {}
+    idx = 0
+    for group in GROUP_ORDER:
+        new_layout[group] = {"start": idx, "size": new_sizes[group]}
+        idx += new_sizes[group]
+
+    # -- Step 4: build global remap (old global → new global) --
+    global_remap: Dict[int, int] = {}
+    for group in GROUP_ORDER:
+        old_start = old_layout[group]["start"]
+        new_start = new_layout[group]["start"]
+        for old_local, new_local in old_to_new_local[group].items():
+            global_remap[old_start + old_local] = new_start + new_local
+
+    # -- Step 5: remap all sequences in-place --
+    for seq in itertools.chain(train_seqs, val_seqs):
+        for i, tok in enumerate(seq):
+            seq[i] = global_remap[tok]
+
+    # -- Step 6: rebuild vocab metadata --
+
+    # BAR: keep only pairs whose local index was used
+    old_bar_pairs = vocab["bar_pairs"]
+    bar_remap = old_to_new_local["BAR"]
+    new_bar_pairs: List[Tuple[int, int]] = []
+    new_bar_pair_to_local: Dict[str, int] = {}
+    for old_local in sorted(bar_remap.keys()):
+        pair = old_bar_pairs[old_local]
+        new_bar_pairs.append(pair)
+        s, p = pair
+        new_bar_pair_to_local[f"{s}:{p}"] = bar_remap[old_local]
+
+    # VEL: keep only bins at used indices
+    vel_remap = old_to_new_local["VEL"]
+    new_velocity_bins = [vocab["velocity_bins"][old] for old in sorted(vel_remap.keys())]
+
+    # DUR: keep only bins at used indices
+    dur_remap = old_to_new_local["DUR"]
+    new_duration_bins_qn = [vocab["duration_bins_qn"][old] for old in sorted(dur_remap.keys())]
+
+    # PITCH: remap local indices in pitch maps
+    gen_remap = old_to_new_local["PITCH_GENERAL"]
+    drums_remap = old_to_new_local["PITCH_DRUMS"]
+    new_pitch_maps = {
+        "general": {midi_pitch: gen_remap[local]
+                     for midi_pitch, local in vocab["pitch_maps"]["general"].items()
+                     if local in gen_remap},
+        "drums":   {midi_pitch: drums_remap[local]
+                     for midi_pitch, local in vocab["pitch_maps"]["drums"].items()
+                     if local in drums_remap},
+    }
+
+    # -- Step 7: report savings --
+    print("\n── Vocab Compaction ─────────────────────────")
+    total_removed = 0
+    for group in GROUP_ORDER:
+        old_sz = old_layout[group]["size"]
+        new_sz = new_sizes[group]
+        removed = old_sz - new_sz
+        total_removed += removed
+        if removed > 0:
+            print(f"  {group:>15}: {old_sz:4d} → {new_sz:4d}  (removed {removed})")
+    old_total = max(v["start"] + v["size"] for v in old_layout.values())
+    new_total = max(v["start"] + v["size"] for v in new_layout.values())
+    print(f"  {'TOTAL':>15}: {old_total:4d} → {new_total:4d}  (removed {total_removed})")
+    print("─────────────────────────────────────────────")
+
+    # -- Update vocab dict --
+    vocab["layout"] = new_layout
+    vocab["bar_pairs"] = new_bar_pairs
+    vocab["bar_pair_to_local"] = new_bar_pair_to_local
+    vocab["velocity_bins"] = new_velocity_bins
+    vocab["duration_bins_qn"] = new_duration_bins_qn
+    vocab["pitch_maps"] = new_pitch_maps
+
+    return vocab
+
+
 # -------------- MAIN PIPELINE --------------
 def main():
     global MIDI_FOLDER, DATA_FOLDER, SAMPLES_DIR, AUG_ENABLE
@@ -927,6 +1051,9 @@ def main():
 
     train_seqs, train_aux = tokenize_group_with_aux(train_paths, do_aug=True)
     val_seqs,   val_aux   = tokenize_group_with_aux(val_paths, do_aug=False)
+
+    # 5b) Compact vocab — remove dead tokens, remap sequences in-place
+    vocab = compact_vocab(train_seqs, val_seqs, vocab)
 
     # 6) Save
     with open(os.path.join(DATA_FOLDER, "events_train.pkl"), "wb") as f:
