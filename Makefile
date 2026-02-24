@@ -64,6 +64,9 @@ blues-train: $(BLUES_EVENTS)/events_train.pkl ## Train on preprocessed blues eve
 	  --save_path $(BLUES_CKPT) \
 	  --device auto $(ARGS)
 
+blues-retrain: ## make blues-preprocess && make blues-train
+	make blues-preprocess && make blues-train
+
 $(BLUES_EVENTS)/events_train.pkl: data/blues_midi/.fetched
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS)
 
