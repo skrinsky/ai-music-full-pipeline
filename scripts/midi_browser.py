@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
 from tkinter import ttk
 from typing import List, Optional
@@ -46,6 +47,9 @@ class MidiBrowser(tk.Tk):
         # Playback state
         self.proc: Optional[subprocess.Popen] = None
         self.paused: bool = False
+        self.current_pm: Optional[pretty_midi.PrettyMIDI] = None
+        self.solo_track_idx: Optional[int] = None
+        self._tmp_solo: Optional[str] = None  # temp file path
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -124,6 +128,8 @@ class MidiBrowser(tk.Tk):
         tree_scroll.pack(side="right", fill="y", padx=(0, 8))
         self.tree.pack(fill="both", expand=True, padx=(8, 0), pady=4)
 
+        self.tree.bind("<<TreeviewSelect>>", self._on_track_select)
+
         # Bottom: transport controls
         transport = tk.Frame(self, pady=6)
         transport.pack(fill="x")
@@ -144,8 +150,16 @@ class MidiBrowser(tk.Tk):
                                   command=self._next)
         self.btn_next.pack(side="left", padx=4)
 
+        self.btn_logic = tk.Button(transport, text="Logic", width=8,
+                                   command=self._open_in_logic)
+        self.btn_logic.pack(side="left", padx=(16, 4))
+
         self.lbl_pos = tk.Label(transport, text="— / —", font=("Menlo", 11))
         self.lbl_pos.pack(side="right", padx=12)
+
+        self.lbl_solo = tk.Label(transport, text="", font=("Menlo", 11, "bold"),
+                                 fg="red")
+        self.lbl_solo.pack(side="right", padx=4)
 
     # ── Selection & detail ──────────────────────────────────────────
 
@@ -164,14 +178,18 @@ class MidiBrowser(tk.Tk):
         basename = os.path.basename(path)
         self.lbl_file.config(text=f"File: {basename}")
         self.lbl_pos.config(text=f"{idx + 1} / {len(self.paths)}")
+        self.solo_track_idx = None
+        self.lbl_solo.config(text="")
 
         try:
             pm = pretty_midi.PrettyMIDI(path)
         except Exception as e:
             self.lbl_meta.config(text=f"Error loading: {e}")
+            self.current_pm = None
             self._clear_tree()
             return
 
+        self.current_pm = pm
         dur = pm.get_end_time()
         tc = pm.get_tempo_changes()
         tempo_str = f"{tc[1][0]:.1f} BPM" if tc[1].size > 0 else "unknown"
@@ -207,6 +225,60 @@ class MidiBrowser(tk.Tk):
                 prange,
             ))
 
+    # ── Track solo ───────────────────────────────────────────────────
+
+    def _on_track_select(self, event: tk.Event) -> None:
+        sel = self.tree.selection()
+        if not sel:
+            return
+        item = sel[0]
+        children = self.tree.get_children()
+        track_idx = children.index(item)
+
+        if track_idx == self.solo_track_idx:
+            # Click same row again → deselect → full mix
+            self.tree.selection_remove(item)
+            self.solo_track_idx = None
+            self.lbl_solo.config(text="")
+        else:
+            self.solo_track_idx = track_idx
+            slot_name = self.tree.item(item, "values")[4]  # "Slot" column
+            self.lbl_solo.config(text=f"SOLO: {slot_name}")
+
+        # Restart playback if currently playing
+        was_playing = self.proc is not None and self.proc.poll() is None
+        if was_playing:
+            self._stop()
+            self._play()
+
+    def _make_solo_midi(self, pm: pretty_midi.PrettyMIDI, track_idx: int) -> str:
+        """Write a temp MIDI containing only the given track. Returns path."""
+        self._clean_tmp_solo()
+        solo = pretty_midi.PrettyMIDI(initial_tempo=pm.get_tempo_changes()[1][0]
+                                      if pm.get_tempo_changes()[1].size > 0
+                                      else 120.0)
+        # Copy time signature changes
+        for ts in pm.time_signature_changes:
+            solo.time_signature_changes.append(ts)
+
+        orig = pm.instruments[track_idx]
+        inst = pretty_midi.Instrument(program=orig.program, is_drum=orig.is_drum,
+                                      name=orig.name or "")
+        inst.notes = list(orig.notes)
+        inst.control_changes = list(orig.control_changes)
+        solo.instruments.append(inst)
+
+        fd, path = tempfile.mkstemp(suffix=".mid", prefix="solo_")
+        os.close(fd)
+        solo.write(path)
+        self._tmp_solo = path
+        return path
+
+    def _clean_tmp_solo(self) -> None:
+        if self._tmp_solo and os.path.exists(self._tmp_solo):
+            os.unlink(self._tmp_solo)
+            self._tmp_solo = None
+
     # ── Playback ────────────────────────────────────────────────────
 
     def _play_pause(self) -> None:
@@ -222,7 +294,12 @@ class MidiBrowser(tk.Tk):
             return
         self._kill_proc()
 
-        path = self.paths[self.current_idx]
+        if (self.solo_track_idx is not None
+                and self.current_pm is not None
+                and self.solo_track_idx < len(self.current_pm.instruments)):
+            path = self._make_solo_midi(self.current_pm, self.solo_track_idx)
+        else:
+            path = self.paths[self.current_idx]
         try:
             self.proc = subprocess.Popen(
                 [FLUIDSYNTH_BIN, "-a", "coreaudio", "-n", "-i", SOUNDFONT, path],
@@ -307,10 +384,19 @@ class MidiBrowser(tk.Tk):
             self._load_detail(new_idx)
             self._play()
 
+    # ── Open in DAW ─────────────────────────────────────────────────
+
+    def _open_in_logic(self) -> None:
+        if self.current_idx < 0:
+            return
+        path = self.paths[self.current_idx]
+        subprocess.Popen(["open", "-a", "Logic Pro", path])
+
     # ── Cleanup ─────────────────────────────────────────────────────
 
     def _on_close(self) -> None:
         self._kill_proc()
+        self._clean_tmp_solo()
         self.destroy()
 
 
