@@ -252,22 +252,56 @@ class PositionalEmbedding(nn.Module):
     def forward(self, x):  # (B,T,D)
         return x + self.pe[:x.size(1)].unsqueeze(0)
 
-def _aux_weight_vector(aux_dim: int) -> torch.Tensor:
-    """
-    aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12), swing(1), blues(1)] = 36
-    """
-    if aux_dim != 36:
-        # fallback for other sizes
-        return torch.ones(aux_dim, dtype=torch.float32)
+def _aux_weight_vector(aux_dim: int, vocab: Optional[Dict] = None) -> torch.Tensor:
+    """Build per-element weight vector for aux loss from vocab metadata.
 
-    w = torch.ones(36, dtype=torch.float32)
-    w[0:6] = AUX_WEIGHTS["max_poly"]
-    w[6:12] = AUX_WEIGHTS["mean_poly"]
-    w[12:18] = AUX_WEIGHTS["overlap"]
-    w[18:22] = AUX_WEIGHTS["chords"]
-    w[22:34] = AUX_WEIGHTS["pc_hist"]
-    w[34] = AUX_WEIGHTS["swing"]
-    w[35] = AUX_WEIGHTS["blues"]
+    Reads the aux layout from vocab JSON to handle variable instrument counts.
+    Falls back to uniform weights if layout isn't available.
+    """
+    w = torch.ones(aux_dim, dtype=torch.float32)
+
+    # Try to parse aux layout from vocab
+    aux_meta = None
+    if vocab is not None and isinstance(vocab.get("aux"), dict):
+        aux_meta = vocab["aux"]
+
+    if aux_meta is None:
+        return w
+
+    # Determine instrument count from vocab
+    inst_names = vocab.get("instrument_names", [])
+    n_inst = len(inst_names) if inst_names else 6
+    has_chords = aux_meta.get("has_chords", n_inst == 6)
+    has_swing_blues = aux_meta.get("has_swing_blues", n_inst == 6)
+
+    # Build weight vector based on dynamic layout
+    idx = 0
+    # max_poly[N]
+    w[idx:idx+n_inst] = AUX_WEIGHTS.get("max_poly", 1.0)
+    idx += n_inst
+    # mean_poly[N]
+    if idx + n_inst <= aux_dim:
+        w[idx:idx+n_inst] = AUX_WEIGHTS.get("mean_poly", 1.0)
+        idx += n_inst
+    # overlap[N]
+    if idx + n_inst <= aux_dim:
+        w[idx:idx+n_inst] = AUX_WEIGHTS.get("overlap", 2.0)
+        idx += n_inst
+    # chord stats (4) — only if present
+    if has_chords and idx + 4 <= aux_dim:
+        w[idx:idx+4] = AUX_WEIGHTS.get("chords", 1.0)
+        idx += 4
+    # pc_hist (12)
+    if idx + 12 <= aux_dim:
+        w[idx:idx+12] = AUX_WEIGHTS.get("pc_hist", 1.0)
+        idx += 12
+    # swing + blues (2) — only if present
+    if has_swing_blues and idx + 2 <= aux_dim:
+        w[idx] = AUX_WEIGHTS.get("swing", 2.0)
+        idx += 1
+        w[idx] = AUX_WEIGHTS.get("blues", 2.0)
+        idx += 1
+
     return w
 
 class FactorizedESModel(nn.Module):
@@ -574,7 +608,7 @@ def main():
     val_ds   = EventDataset(VAL_PKL,   expect_aux=expect_aux)
 
     aux_dim_used = aux_dim if (AUX_ENABLED and aux_dim > 0 and train_ds.aux is not None) else 0
-    aux_wvec = _aux_weight_vector(aux_dim_used) if aux_dim_used > 0 else None
+    aux_wvec = _aux_weight_vector(aux_dim_used, vocab) if aux_dim_used > 0 else None
 
 
     # DataLoader settings (macOS uses spawn; keep collate_fn picklable)

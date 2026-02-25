@@ -42,6 +42,11 @@ def set_gm_programs(midi_path: str):
         "other": 80,    # Lead 1 (square)
         "voxlead": 52,  # Choir Aahs
         "voxharm": 54,  # Synth Voice
+        # Chorale voices
+        "soprano": 73,  # Flute
+        "alto": 69,     # English Horn
+        "tenor": 71,    # Clarinet
+        "bassvox": 70,  # Bassoon
     }
     pm = pretty_midi.PrettyMIDI(midi_path)
     changed = 0
