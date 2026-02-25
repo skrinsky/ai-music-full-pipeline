@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-retrain chorale-generate cg chorale-audition chorale-browse
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -64,6 +64,16 @@ blues-train: $(BLUES_EVENTS)/events_train.pkl ## Train on preprocessed blues eve
 	  --save_path $(BLUES_CKPT) \
 	  --device auto $(ARGS)
 
+blues-resume: $(BLUES_CKPT) ## Resume blues training from latest checkpoint
+	$(PYTHON) training/train.py \
+	  --data_dir $(BLUES_EVENTS) \
+	  --train_pkl $(BLUES_EVENTS)/events_train.pkl \
+	  --val_pkl $(BLUES_EVENTS)/events_val.pkl \
+	  --vocab_json $(BLUES_EVENTS)/event_vocab.json \
+	  --save_path $(BLUES_CKPT) \
+	  --resume $(BLUES_CKPT) \
+	  --device auto $(ARGS)
+
 blues-retrain: ## make blues-preprocess && make blues-train
 	make blues-preprocess && make blues-train
 
@@ -109,6 +119,16 @@ chorale-train: $(CHORALE_EVENTS)/events_train.pkl ## Train on preprocessed chora
 	  --val_pkl $(CHORALE_EVENTS)/events_val.pkl \
 	  --vocab_json $(CHORALE_EVENTS)/event_vocab.json \
 	  --save_path $(CHORALE_CKPT) \
+	  --device auto $(ARGS)
+
+chorale-resume: $(CHORALE_CKPT) ## Resume chorale training from latest checkpoint
+	$(PYTHON) training/train.py \
+	  --data_dir $(CHORALE_EVENTS) \
+	  --train_pkl $(CHORALE_EVENTS)/events_train.pkl \
+	  --val_pkl $(CHORALE_EVENTS)/events_val.pkl \
+	  --vocab_json $(CHORALE_EVENTS)/event_vocab.json \
+	  --save_path $(CHORALE_CKPT) \
+	  --resume $(CHORALE_CKPT) \
 	  --device auto $(ARGS)
 
 chorale-retrain: ## make chorale-preprocess && make chorale-train

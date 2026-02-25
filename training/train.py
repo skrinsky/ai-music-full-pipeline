@@ -501,6 +501,7 @@ def main():
     ap.add_argument("--n_heads", type=int, default=None, help="Manual override attention heads (disables auto_scale if set).")
     ap.add_argument("--ff_mult", type=int, default=None, help="Manual override FFN multiplier (dim_feedforward = d_model * ff_mult).")
     ap.add_argument("--seq_len", type=int, default=SEQ_LEN, help="Sequence length (keep at 512 unless you have a reason).")
+    ap.add_argument("--resume", default=None, help="Path to checkpoint .pt to resume training from (restores model, optimizer, epoch, best_val).")
     args = ap.parse_args()
 
     DATA_DIR   = args.data_dir
@@ -672,6 +673,23 @@ def main():
 
     best_val = float('inf'); best_epoch = -1
     epochs_no_improve = 0
+    start_epoch = 1
+
+    # ── resume from checkpoint ─────────────────────────────────
+    if args.resume:
+        if not os.path.isfile(args.resume):
+            print(f"ERROR: --resume path not found: {args.resume}", file=sys.stderr)
+            sys.exit(1)
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        opt.load_state_dict(ckpt["optimizer_state_dict"])
+        resumed_epoch = ckpt.get("epoch", 0)
+        start_epoch = resumed_epoch + 1
+        best_val = ckpt.get("best_val", float('inf'))
+        best_epoch = ckpt.get("best_epoch", resumed_epoch)
+        # Fast-forward scheduler to the right step
+        sched.step_num = resumed_epoch * steps_per_epoch
+        print(f"Resumed from {args.resume} (epoch {resumed_epoch}, best_val={best_val:.4f}, best_epoch={best_epoch})")
 
     # ── epoch loop helpers ─────────────────────────────────────
     def run_epoch(loader, split: str):
@@ -791,7 +809,7 @@ def main():
         return avg_loss, ppl, acc_exact, avg_tloss, avg_vloss, acc_type, acc_value, avg_aux_loss, avg_aux_mae
 
     # ── main training loop ─────────────────────────────────────
-    for epoch in range(1, EPOCHS+1):
+    for epoch in range(start_epoch, EPOCHS+1):
         t0 = time.time()
         tr = run_epoch(train_loader, "train")
         va = run_epoch(val_loader, "val")
@@ -828,6 +846,8 @@ def main():
             ckpt_path = f"{base}_epoch{epoch:03d}_val{va_loss:.4f}{ext}"
             ckpt_payload = {
                 "epoch": epoch,
+                "best_val": best_val,
+                "best_epoch": best_epoch,
                 "model_state_dict": model.state_dict(),
                 "model_state": model.state_dict(),  # alias
                 "optimizer_state_dict": opt.state_dict(),
@@ -876,7 +896,7 @@ def main():
                 for old in existing[args.keep_top_k:]:
                     os.remove(old)
 
-            msg += f"  → Saved {os.path.basename(ckpt_path)}"
+            msg += f"  → Saved {os.path.basename(ckpt_path)} at {time.strftime('%H:%M:%S')}"
         else:
             epochs_no_improve += 1
 
