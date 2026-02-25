@@ -21,7 +21,9 @@ import pretty_midi
 # Import the canonical mapping from training code
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from training.pre import (
-    INSTRUMENT_NAMES,
+    INSTRUMENT_PRESETS,
+    InstrumentConfig,
+    make_instrument_config,
     map_name_to_slot,
 )
 
@@ -78,8 +80,15 @@ def _midi_paths(folder: str) -> List[str]:
     return paths
 
 
+def _get_config(args: argparse.Namespace) -> InstrumentConfig:
+    """Build InstrumentConfig from --instrument_set flag."""
+    preset = getattr(args, "instrument_set", "blues6")
+    return make_instrument_config(INSTRUMENT_PRESETS[preset])
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     """Aggregate instrumentation table across all files."""
+    config = _get_config(args)
     paths = _midi_paths(args.folder)
     slot_notes: Counter = Counter()
     slot_files: Counter = Counter()
@@ -96,7 +105,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
         total_files += 1
         file_slots: set = set()
         for inst in pm.instruments:
-            slot = map_name_to_slot(inst)
+            slot = map_name_to_slot(inst, config)
             n = len(inst.notes)
             slot_notes[slot] += n
             if n > 0:
@@ -107,7 +116,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
     total_notes = sum(slot_notes.values())
     print(f"\n{'Slot':<12} {'Name':<10} {'Notes':>10} {'%Notes':>8} {'Files':>8} {'%Files':>8}")
     print("-" * 60)
-    for i, name in enumerate(INSTRUMENT_NAMES):
+    for i, name in enumerate(config.names):
         n = slot_notes.get(i, 0)
         f = slot_files.get(i, 0)
         pn = 100.0 * n / total_notes if total_notes else 0
@@ -119,6 +128,7 @@ def cmd_stats(args: argparse.Namespace) -> None:
 
 def cmd_list(args: argparse.Namespace) -> None:
     """One line per file."""
+    config = _get_config(args)
     paths = _midi_paths(args.folder)
     for p in paths:
         try:
@@ -129,12 +139,12 @@ def cmd_list(args: argparse.Namespace) -> None:
         dur = pm.get_end_time()
         notes_per_slot: Counter = Counter()
         for inst in pm.instruments:
-            slot = map_name_to_slot(inst)
+            slot = map_name_to_slot(inst, config)
             notes_per_slot[slot] += len(inst.notes)
         total = sum(notes_per_slot.values())
         breakdown = "  ".join(
-            f"{INSTRUMENT_NAMES[i]}={notes_per_slot.get(i, 0)}"
-            for i in range(len(INSTRUMENT_NAMES))
+            f"{config.names[i]}={notes_per_slot.get(i, 0)}"
+            for i in range(len(config.names))
             if notes_per_slot.get(i, 0) > 0
         )
         print(f"{os.path.basename(p):<40} {dur:6.1f}s  {total:>6} notes  {breakdown}")
@@ -142,6 +152,7 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_info(args: argparse.Namespace) -> None:
     """Per-track detail for a single file."""
+    config = _get_config(args)
     path = args.file
     if not os.path.isfile(path):
         print(f"ERROR: file not found: {path}", file=sys.stderr)
@@ -157,7 +168,7 @@ def cmd_info(args: argparse.Namespace) -> None:
     print(fmt.format("#", "Raw Name", "Drum?", "Prog", "GM Name", "Slot", "Notes", "Pitch"))
     print("-" * 100)
     for i, inst in enumerate(pm.instruments):
-        slot = map_name_to_slot(inst)
+        slot = map_name_to_slot(inst, config)
         n = len(inst.notes)
         if n > 0:
             pitches = [note.pitch for note in inst.notes]
@@ -170,7 +181,7 @@ def cmd_info(args: argparse.Namespace) -> None:
             "Y" if inst.is_drum else "N",
             inst.program,
             gm_name(inst.program)[:30],
-            INSTRUMENT_NAMES[slot],
+            config.names[slot],
             n,
             prange,
         ))
@@ -191,20 +202,26 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd")
     sub.required = True
 
+    _iset_choices = list(INSTRUMENT_PRESETS.keys())
+
     p_stats = sub.add_parser("stats", help="Aggregate instrumentation table")
     p_stats.add_argument("--folder", default="data/blues_midi", help="MIDI folder")
+    p_stats.add_argument("--instrument_set", default="blues6", choices=_iset_choices, help="Instrument set")
     p_stats.set_defaults(func=cmd_stats)
 
     p_list = sub.add_parser("list", help="One line per file")
     p_list.add_argument("--folder", default="data/blues_midi", help="MIDI folder")
+    p_list.add_argument("--instrument_set", default="blues6", choices=_iset_choices, help="Instrument set")
     p_list.set_defaults(func=cmd_list)
 
     p_info = sub.add_parser("info", help="Per-track detail for one file")
     p_info.add_argument("file", help="Path to MIDI file")
+    p_info.add_argument("--instrument_set", default="blues6", choices=_iset_choices, help="Instrument set")
     p_info.set_defaults(func=cmd_info)
 
     p_play = sub.add_parser("play", help="Info + open for macOS playback")
     p_play.add_argument("file", help="Path to MIDI file")
+    p_play.add_argument("--instrument_set", default="blues6", choices=_iset_choices, help="Instrument set")
     p_play.set_defaults(func=cmd_play)
 
     args = ap.parse_args()

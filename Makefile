@@ -94,7 +94,7 @@ chorale-convert: ## Convert Bach chorale NPZ → MIDI files
 	  --npz $(CHORALE_NPZ) --out_dir $(CHORALE_MIDI) --bpm 100 $(ARGS)
 
 chorale-audition: data/chorales_midi/.converted ## Audition chorale MIDIs (stats/list/info/play)
-	$(PYTHON) scripts/audition_gigamidi.py stats --folder $(CHORALE_MIDI) $(ARGS)
+	$(PYTHON) scripts/audition_gigamidi.py stats --folder $(CHORALE_MIDI) --instrument_set chorale4 $(ARGS)
 
 chorale-browse: data/chorales_midi/.converted ## Browse + play chorale MIDIs (tkinter GUI)
 	$(PYTHON) scripts/midi_browser.py --folder $(CHORALE_MIDI) $(ARGS)
