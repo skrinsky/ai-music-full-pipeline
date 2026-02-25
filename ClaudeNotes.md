@@ -543,5 +543,63 @@ Training Results Analysis
   can run that at your convenience -- it takes ~45+ minutes with 996 files × 12 augmentation variants.
 
 ------------------------------------------------------------------------------------------------------------------------
+2026-02-25 10:25
+
+> This project (/l/a3) trains on data such as in ./data/blues_midi/ .
+  If possible, I would like to extend the system to handle Bach
+  chorales, such as trained on by /w/TonicNet/ (added to this
+  session).  Ideally they would be handled as four instruments
+  (soprano, alto, tenor, bass).  Please develop CHORALE_PLAN.md
+  detailing what all we need to do to make this happen.
+
+...
+
+⏺ Here's a summary of everything implemented:
+
+  Implementation Summary
+
+  New Files
+
+  - scripts/convert_chorales_npz_to_midi.py -- NPZ-to-MIDI converter (handles NaN rests, sustained note detection, 4 voices: soprano/alto/tenor/bassvox)
+  - scripts/run_chorale_pipeline.sh -- End-to-end pipeline script (convert → preprocess → train → generate)
+  - tests/test_chorale_convert.py -- 10 tests for converter
+  - tests/test_instrument_config.py -- 14 tests for InstrumentConfig/presets/aux layout
+  - tests/test_chorale_preprocess.py -- 7 tests for chorale preprocessing pipeline
+
+  Modified Files
+
+  training/pre.py (core refactor):
+  - Added InstrumentConfig dataclass with auto-detected role indices
+  - Added INSTRUMENT_PRESETS dict (blues6, chorale4)
+  - make_instrument_config() auto-detects roles, sets chorale-specific aug params + voice ranges
+  - All functions now accept optional config param (default = blues6 for backward compat)
+  - map_name_to_slot() -- exact-match for non-blues configs, heuristics only for blues6
+  - augment_events_additive() -- voice range validation, returns None to reject out-of-range transpositions
+  - build_pitch_maps() -- skips drums map when no drums in config
+  - build_event_vocab() -- omits PITCH_DRUMS when no drums; INST size = config.num_instruments
+  - compute_aux_layout() -- new function: dynamically computes aux_dim (blues6=36, chorale4=24)
+  - compute_aux_for_window() -- conditionally includes chord_stats, swing/blues based on config
+  - compact_vocab() -- data-driven GROUP_ORDER (skips PITCH_DRUMS if absent)
+  - CLI: added --instrument_set {blues6,chorale4} and --instruments args
+  - Legacy globals (INSTRUMENT_NAMES, DRUM_IDX, etc.) preserved for backward compat
+
+  training/train.py:
+  - _aux_weight_vector() -- reads aux layout from vocab JSON dynamically (handles variable aux_dim)
+
+  training/generate.py:
+  - Added chorale GM programs: soprano=Flute(73), alto=English Horn(69), tenor=Clarinet(71), bassvox=Bassoon(70)
+
+  tests/test_map_name_to_slot.py -- updated imports, added chorale4 name-mapping tests
+
+  Smoke Test Results
+
+  - Converted 305 chorales (229 train + 76 val) to MIDI
+  - Preprocessed to 5996 train windows + 216 val windows
+  - Vocab: 96 tokens, 4 INST, no PITCH_DRUMS, aux_dim=24
+  - 53/53 tests passing
+
+✻ Cogitated for 9m 21s
+
+------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------
 
