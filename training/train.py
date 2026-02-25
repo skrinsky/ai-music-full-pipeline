@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, json, math, pickle, random, time, argparse
+import os, glob as globmod, json, math, pickle, random, time, argparse
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 from functools import partial
@@ -461,6 +461,7 @@ def main():
     ap.add_argument("--min_params", type=int, default=100000, help="Minimum parameter budget when auto_scale is enabled.")
     ap.add_argument("--patience", type=int, default=25, help="Early stop if val loss does not improve for this many epochs (0 disables).")
     ap.add_argument("--min_delta", type=float, default=1e-4, help="Minimum val-loss improvement to count as improvement (for patience reset).")
+    ap.add_argument("--keep_top_k", type=int, default=3, help="Keep the top-K best checkpoints (by val loss). 0 keeps only the latest best.")
     ap.add_argument("--d_model", type=int, default=None, help="Manual override d_model (disables auto_scale if set).")
     ap.add_argument("--n_layers", type=int, default=None, help="Manual override number of Transformer layers (disables auto_scale if set).")
     ap.add_argument("--n_heads", type=int, default=None, help="Manual override attention heads (disables auto_scale if set).")
@@ -758,11 +759,14 @@ def main():
             best_val = va_loss
             best_epoch = epoch
             epochs_no_improve = 0
-            torch.save({
+
+            # ── versioned checkpoint save ─────────────────────────
+            base, ext = os.path.splitext(SAVE_PATH)
+            ckpt_path = f"{base}_epoch{epoch:03d}_val{va_loss:.4f}{ext}"
+            ckpt_payload = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "model_state": model.state_dict(),  # alias
-
                 "optimizer_state_dict": opt.state_dict(),
                 "factored_meta": {
                     "type_names": type_names,
@@ -779,8 +783,6 @@ def main():
                     "VOCAB_JSON": VOCAB_JSON
                 },
                 "config": {
-                    # legacy name (kept for backwards compatibility)
-
                     "D_MODEL": D_MODEL, "N_HEADS": N_HEADS, "N_LAYERS": N_LAYERS,
                     "FF_MULT": FF_MULT, "DROPOUT": DROPOUT, "SEQ_LEN": SEQ_LEN,
                     "DATA_DIR": DATA_DIR,
@@ -791,8 +793,27 @@ def main():
                     "DATA_DIR": DATA_DIR,
                     "PAD_ID": PAD_ID, "BOS_ID": BOS_ID, "EOS_ID": EOS_ID,
                 }
-            }, SAVE_PATH)
-            msg += "  → Saved best"
+            }
+            torch.save(ckpt_payload, ckpt_path)
+            # symlink SAVE_PATH → latest best for generate.py compatibility
+            tmp_link = SAVE_PATH + ".tmp"
+            os.symlink(os.path.basename(ckpt_path), tmp_link)
+            os.replace(tmp_link, SAVE_PATH)
+
+            # prune old checkpoints beyond keep_top_k
+            if args.keep_top_k > 0:
+                existing = sorted(globmod.glob(f"{base}_epoch*{ext}"))
+                # parse val loss from filename to sort by quality
+                def _val_from_name(p: str) -> float:
+                    try:
+                        return float(p.rsplit("_val", 1)[1].replace(ext, ""))
+                    except (IndexError, ValueError):
+                        return float("inf")
+                existing.sort(key=_val_from_name)
+                for old in existing[args.keep_top_k:]:
+                    os.remove(old)
+
+            msg += f"  → Saved {os.path.basename(ckpt_path)}"
         else:
             epochs_no_improve += 1
 
@@ -805,7 +826,7 @@ def main():
             break
 
 
-    print(f"Done. Best epoch {best_epoch} | best val loss {best_val:.3f} | saved → {SAVE_PATH}")
+    print(f"Done. Best epoch {best_epoch} | best val loss {best_val:.3f} | saved → {os.path.realpath(SAVE_PATH)}")
 
 if __name__ == "__main__":
     main()
