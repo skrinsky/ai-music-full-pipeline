@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, glob as globmod, json, math, pickle, random, time, argparse
+import os, sys, glob as globmod, json, math, pickle, random, time, argparse, atexit, signal
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 from functools import partial
@@ -474,6 +474,35 @@ def main():
     VAL_PKL    = args.val_pkl
     VOCAB_JSON = args.vocab_json
     SAVE_PATH  = args.save_path
+
+    # ── single-instance lock ──────────────────────────────────
+    lock_path = SAVE_PATH + ".lock"
+    if os.path.exists(lock_path):
+        try:
+            other_pid = int(open(lock_path).read().strip())
+            os.kill(other_pid, 0)  # check if alive
+            print(f"ERROR: another train.py (PID {other_pid}) is already "
+                  f"writing to {SAVE_PATH}. Kill it first or use a different --save_path.")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # stale lock — previous run died
+        except PermissionError:
+            # process exists but we can't signal it (different user)
+            print(f"ERROR: another train.py is already writing to {SAVE_PATH} (lock PID in {lock_path}).")
+            sys.exit(1)
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    with open(lock_path, "w") as f:
+        f.write(str(os.getpid()))
+
+    def _remove_lock():
+        try:
+            if os.path.exists(lock_path) and open(lock_path).read().strip() == str(os.getpid()):
+                os.remove(lock_path)
+        except OSError:
+            pass
+
+    atexit.register(_remove_lock)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     # Allow seq_len override (default 512).
     SEQ_LEN = int(args.seq_len)
