@@ -10,7 +10,7 @@ cd "$ROOT"
 
 echo "=== Step 1: Convert NPZ → MIDI ==="
 python scripts/convert_chorales_npz_to_midi.py \
-  --npz /w/TonicNet/dataset_unprocessed/Jsb16thSeparated.npz \
+  --npz data/Jsb16thSeparated.npz \
   --out_dir data/chorales_midi --bpm 100
 
 echo ""

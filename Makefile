@@ -89,7 +89,8 @@ blues-generate bg: $(BLUES_CKPT) ## Generate blues MIDI from trained model
 
 # --- Bach chorale pipeline (NPZ → MIDI → events → train → generate) ---
 
-CHORALE_NPZ   := /w/TonicNet/dataset_unprocessed/Jsb16thSeparated.npz
+# JSB Chorales dataset, originally from TonicNet (omarperacha/TonicNet)
+CHORALE_NPZ   := data/Jsb16thSeparated.npz
 CHORALE_MIDI  := data/chorales_midi
 CHORALE_EVENTS := runs/chorale_events
 CHORALE_CKPT  := runs/checkpoints/chorale_model.pt
