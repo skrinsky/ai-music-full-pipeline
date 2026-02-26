@@ -600,6 +600,111 @@ Training Results Analysis
 
 ✻ Cogitated for 9m 21s
 
-------------------------------------------------------------------------------------------------------------------------
-------------------------------------------------------------------------------------------------------------------------
+...
 
+❯ Why do the chorale epochs go by so much faster than the blues epochs?
+
+⏺ Dataset size. Each epoch iterates over all training windows, so epoch time is proportional to the number of windows in events_train.pkl.
+
+  Chorales are small in every dimension:
+  - Fewer pieces -- ~400 Bach chorales vs potentially thousands of blues MIDIs [it's less than 1k, but 100x more "windows"]
+  - Shorter pieces -- a chorale is typically 20-40 bars; blues tracks can be several minutes
+  - Fewer instruments -- 4 voices vs 6, so fewer events per time step
+
+  All of that compounds into far fewer 512-token windows. The model
+  architecture and per-batch cost are similar, but there are just many
+  fewer batches per epoch.
+
+  You can see the exact counts -- training prints the window count at
+  startup in the Auto-scale line (e.g., windows=1234).
+
+------------------------------------------------------------------------------------------------------------------------
+2026-02-26 01:06
+
+Plan: Chorale key normalization + remove transposition augmentation
+
+ Context
+
+ The chorale training pipeline trains on ~350 Bach chorales spanning all 24 keys.
+ Currently, pre.py applies 6 transposition augmentations per chorale (7x total),
+ which inflates the token count without adding proportional harmonic diversity (Bach
+ already covers all keys). The auto-scaler then sizes the model for this inflated
+ count. Instead, we will:
+
+ - Normalize all chorales to a canonical key (C major / A minor) during MIDI
+ conversion, concentrating harmonic patterns into one key space
+ - Remove transposition augmentation since it's redundant with normalized keys
+ - Keep target_tpp=8 (unchanged) and let the auto-scaler size the model honestly
+
+ Changes
+
+ 1. Add --normalize-key to scripts/convert_chorales_npz_to_midi.py
+
+ Reuse key detection logic from vendor/all-in-one-ai-midi-pipeline/steps/key_normalize.py:
+ - Detect key from the pitch array using music21's KrumhanslSchmuckler analyzer
+ - Transpose major→C major, minor→A minor (shift in [-6, +6])
+ - Apply pitch shift to the numpy array before converting to MIDI
+ - Print key info (detected key, semitone shift) during conversion
+ - Add --normalize-key CLI flag (off by default)
+
+ 2. Update Makefile: pass --normalize-key in chorale targets
+
+ - data/chorales_midi/.converted rule: add --normalize-key
+ - chorale-convert rule: add --normalize-key
+
+ 3. Remove transposition augmentation in training/pre.py
+
+ - Line 96: change cfg.aug_transposes = [-3, -2, -1, 1, 2, 3] → cfg.aug_transposes = []
+
+ Files modified
+
+ ┌─────────────────────────────────────────┬─────────────────────────────────────────────────────────────┐
+ │                  File                   │                           Change                            │
+ ├─────────────────────────────────────────┼─────────────────────────────────────────────────────────────┤
+ │ scripts/convert_chorales_npz_to_midi.py │ Add --normalize-key flag with key detection + transposition │
+ ├─────────────────────────────────────────┼─────────────────────────────────────────────────────────────┤
+ │ Makefile                                │ Pass --normalize-key in chorale MIDI conversion targets     │
+ ├─────────────────────────────────────────┼─────────────────────────────────────────────────────────────┤
+ │ training/pre.py                         │ Set aug_transposes = [] for chorale4                        │
+ └─────────────────────────────────────────┴─────────────────────────────────────────────────────────────┘
+
+ Verification
+
+ 1. rm -f data/chorales_midi/.converted (force reconversion)
+ 2. make chorale-convert -- check output shows detected keys and transpositions
+ 3. make chorale-preprocess -- check that training windows are ~1/7th of previous (no augmentation)
+ 4. make chorale-train -- observe auto-scaler output: should pick a small model (~100k params)
+
+...
+
+⏺ All three changes are complete. Here's the summary:
+
+  1. scripts/convert_chorales_npz_to_midi.py -- Added --normalize-key flag:
+
+  - Imports _detect_key_music21 and _compute_transpose_semitones from the vendor pipeline
+
+  - New normalize_pitches() function extracts valid pitches from the
+    numpy array, detects key via KrumhanslSchmuckler, computes shift
+    to C major / A minor (in [-6, +6]), and applies it to the array
+
+  - Prints per-chorale key info (detected key, semitone shift, target) when --normalize-key is active
+
+  - Applied to both train+valid and test set conversion paths
+
+  2. Makefile -- Both data/chorales_midi/.converted and chorale-convert targets now pass --normalize-key
+
+  3. training/pre.py -- Changed cfg.aug_transposes = [-3, -2, -1, 1,
+     2, 3] → cfg.aug_transposes = [] for chorale4, with comment
+     explaining keys are normalized at conversion time
+
+  To verify, run the steps from the plan:
+  rm -f data/chorales_midi/.converted
+  make chorale-convert        # check key detection output
+  make chorale-preprocess     # windows should be ~1/7th of before
+  make chorale-train          # auto-scaler should pick smaller model
+  
+---
+
+
+------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------
