@@ -93,7 +93,7 @@ def make_instrument_config(names: List[str]) -> InstrumentConfig:
 
     # Chorale-specific settings
     if set(names) == {"soprano", "alto", "tenor", "bassvox"}:
-        cfg.aug_transposes = [-3, -2, -1, 1, 2, 3]
+        cfg.aug_transposes = []  # keys normalized at MIDI conversion time
         cfg.aug_vel_deltas = []  # uniform velocity in chorales
         cfg.voice_ranges = {
             "soprano": (57, 84),

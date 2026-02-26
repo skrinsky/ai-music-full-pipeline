@@ -539,6 +539,20 @@ def main():
     atexit.register(_remove_lock)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
+    # ── clean stale checkpoints from previous runs ────────────
+    # Without this, the keep_top_k pruner mixes old and new checkpoints,
+    # deleting new (worse-loss) saves when old ones from a different run exist.
+    if not args.resume:
+        base, ext = os.path.splitext(SAVE_PATH)
+        stale = globmod.glob(f"{base}_epoch*{ext}")
+        if stale:
+            print(f"Removing {len(stale)} stale checkpoint(s) from previous run")
+            for f in stale:
+                os.remove(f)
+            # remove broken symlink
+            if os.path.islink(SAVE_PATH):
+                os.remove(SAVE_PATH)
+
     # Allow seq_len override (default 512).
     SEQ_LEN = int(args.seq_len)
 

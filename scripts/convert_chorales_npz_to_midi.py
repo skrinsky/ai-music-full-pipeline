@@ -22,8 +22,42 @@ import sys
 import numpy as np
 import pretty_midi
 
+# Key detection reused from vendor pipeline
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor",
+                                "all-in-one-ai-midi-pipeline"))
+from steps.key_normalize import _detect_key_music21, _compute_transpose_semitones
+
 VOICE_NAMES = ["soprano", "alto", "tenor", "bassvox"]
 REST_THRESHOLD = 36  # pitches below this are rests
+
+
+def normalize_pitches(arr: np.ndarray) -> tuple[np.ndarray, str]:
+    """Detect key and transpose pitch array to C major / A minor.
+
+    Returns (transposed_array, info_string).
+    """
+    pitches_flat = arr.flatten()
+    valid = pitches_flat[~np.isnan(pitches_flat) & (pitches_flat >= REST_THRESHOLD)]
+    pitch_list = [int(round(p)) for p in valid]
+
+    tonic, mode = _detect_key_music21(pitch_list)
+    if tonic is None:
+        return arr, "key=UNKNOWN shift=0"
+
+    semitones, target, reason = _compute_transpose_semitones(tonic, mode)
+    info = f"key={tonic} {mode} shift={semitones:+d}"
+    if target:
+        info += f" -> {target}"
+    if reason:
+        info += f" ({reason})"
+
+    if semitones == 0:
+        return arr, info
+
+    out = arr.copy().astype(np.float64)
+    mask = ~np.isnan(out) & (out >= REST_THRESHOLD)
+    out[mask] += semitones
+    return out, info
 
 
 def chorale_to_midi(arr: np.ndarray, bpm: float = 100.0) -> pretty_midi.PrettyMIDI:
@@ -86,6 +120,8 @@ def main():
     ap.add_argument("--bpm", type=float, default=100.0, help="BPM for output MIDIs (default: 100)")
     ap.add_argument("--include_test", action="store_true",
                     help="Also write test set to <out_dir>_test/")
+    ap.add_argument("--normalize-key", action="store_true",
+                    help="Transpose each chorale to C major / A minor")
     args = ap.parse_args()
 
     if not os.path.isfile(args.npz):
@@ -102,7 +138,11 @@ def main():
         chorales = data[split]
         print(f"{split}: {len(chorales)} chorales")
         for chorale in chorales:
-            pm = chorale_to_midi(chorale, bpm=args.bpm)
+            arr = chorale
+            if args.normalize_key:
+                arr, info = normalize_pitches(arr)
+                print(f"  chorale_{idx:04d}: {info}")
+            pm = chorale_to_midi(arr, bpm=args.bpm)
             out_path = os.path.join(args.out_dir, f"chorale_{idx:04d}.mid")
             pm.write(out_path)
             idx += 1
@@ -115,7 +155,11 @@ def main():
         test_chorales = data["test"]
         print(f"test: {len(test_chorales)} chorales")
         for j, chorale in enumerate(test_chorales):
-            pm = chorale_to_midi(chorale, bpm=args.bpm)
+            arr = chorale
+            if args.normalize_key:
+                arr, info = normalize_pitches(arr)
+                print(f"  chorale_test_{j:04d}: {info}")
+            pm = chorale_to_midi(arr, bpm=args.bpm)
             out_path = os.path.join(test_dir, f"chorale_test_{j:04d}.mid")
             pm.write(out_path)
         print(f"Wrote {len(test_chorales)} test MIDIs to {test_dir}")
