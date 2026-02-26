@@ -232,10 +232,10 @@ Each voice model needs a much smaller vocabulary than the full pipeline:
 | SEP          | 1    | Boundary between context and target   |
 | BAR          | 1    | Bar boundary marker                   |
 | TIME_SHIFT   | 48   | 1/24-QN steps, max 2 QN (half note)   |
-| PITCH        | ~30  | Voice-specific range (see below)      |
+| PITCH        | 52   | Union range MIDI 33–84 (see below)    |
 | REST         | 1    | Explicit silence event                |
 | VOX_S/B/A/T  | 4    | Voice tags in conditioning context    |
-| **Total**    | ~90  | Shared across all voice models        |
+| **Total**    | ~110 | Shared across all voice models        |
 
 TIME_SHIFT tokens encode deltas (time to next event), not grid
 positions.  The 1/24-QN resolution matches the existing pipeline and
@@ -249,6 +249,11 @@ Voice-specific pitch ranges (from existing `pre.py` config):
 | Alto     | 50–77      | 27        | 28           |
 | Tenor    | 43–72      | 29        | 30           |
 | Bassvox  | 33–69      | 36        | 37           |
+
+The pitch space is a union of all voice ranges (MIDI 33–84 = 52
+semitones) so that shared weights can handle any voice.  Per-voice
+range constraints are enforced at generation time by masking logits
+outside the voice's range, not by restricting the vocabulary.
 
 VEL and DUR tokens can likely be omitted for chorales — velocity is
 uniform and duration is implicit (note-on to next note-on or rest in
@@ -271,6 +276,35 @@ standard positional encoding but indexed by continuous musical time
 (in quarter notes) rather than discrete token index.  This provides
 structural temporal alignment across context and target voice streams
 without any extra tokens or grid assumptions.
+
+**Base frequency:** Standard positional encoding uses base=10000,
+tuned for sequences of thousands of tokens.  Musical time spans
+~0–60 QN for a typical chorale.  A base of **100** gives good
+frequency resolution across this range.  Start there and tune if
+attention patterns look misaligned.
+
+## Model hyperparameters
+
+Starting point for the shared-weight model:
+
+| Parameter    | Value | Notes                                  |
+|--------------|-------|----------------------------------------|
+| d_model      | 128   | Small vocab → smaller embedding        |
+| n_heads      | 4     | head_dim = 32                          |
+| n_layers     | 4     | Same depth as current pipeline         |
+| ff_mult      | 3     | FFN = 384                              |
+| dropout      | 0.12  | Match current pipeline                 |
+| seq_len      | 1024  | Fits tenor stage (~600 tokens worst case) |
+| batch_size   | 64    | Same as current pipeline               |
+| lr           | 2e-4  | AdamW, cosine schedule                 |
+| epochs       | 200   | With early stopping (patience=25)      |
+
+Estimated parameters: ~300K.  Small because the vocab is ~110 tokens
+(vs ~2400 in the interleaved pipeline) and sequences are short.
+
+The voice-ID embedding is a learned vector (dim = d_model) added to
+every target-voice token.  Four embeddings total (S, B, A, T).  This
+tells the shared model which voice it is generating.
 
 ## Training procedure
 
@@ -382,28 +416,77 @@ To fairly compare the cascaded pipeline with TonicNet:
    range violations (standard chorale metrics)
 4. **Listening test** — blind A/B comparison of generated chorales
 
+## Implementation order
+
+A fresh session should implement in this order:
+
+### Phase 1: Preprocessing (`training/pre_cascade.py`)
+1. Parse chorale MIDIs into 4 separate voice note-lists (reuse
+   existing MIDI parsing from `pre.py`)
+2. Encode each voice as a token sequence: `Δt PITCH Δt PITCH ...`
+3. Compute cumulative musical time for each token
+4. Build training examples for all 4 cascade stages:
+   - Stage 1 (soprano): `[BOS] [SEP] soprano_tokens [EOS]`
+   - Stage 2 (bass): `[BOS] merged(S) [SEP] bass_tokens [EOS]`
+   - Stage 3 (alto): `[BOS] merged(S,B) [SEP] alto_tokens [EOS]`
+   - Stage 4 (tenor): `[BOS] merged(S,B,A) [SEP] tenor_tokens [EOS]`
+5. Apply transposition augmentation (±3 semitones, 7x)
+6. Save as pickle: token_ids, musical_times, voice_ids, stage_ids
+7. Save vocab JSON (shared across all stages)
+8. Unit tests for preprocessing
+
+### Phase 2: Model (`training/model_cascade.py`)
+1. Musical time embedding (sinusoidal, base=100)
+2. Shared transformer encoder with triple embedding
+   (token + position + musical_time)
+3. Voice-ID embedding (4 learned vectors)
+4. Output head: pitch logits + time-shift logits (simple, not
+   factored — vocab is small enough for a single softmax)
+5. Causal mask + loss only on target tokens (after [SEP])
+6. Unit tests for model forward pass
+
+### Phase 3: Training (`training/train_cascade.py`)
+1. DataLoader that mixes all 4 stages in each batch
+2. Training loop (AdamW, cosine schedule, early stopping)
+3. Checkpoint saving with config metadata
+4. Makefile targets: `chorale-cascade-preprocess`, `chorale-cascade-train`
+
+### Phase 4: Generation (`training/generate_cascade.py`)
+1. 4-stage sequential generation with context building
+2. Voice-range masking on pitch logits
+3. Temperature + nucleus sampling
+4. Merge voice sequences → multi-track MIDI
+5. Makefile target: `chorale-cascade-generate`
+
+### Phase 5: Evaluation
+1. Token-level accuracy on held-out chorales (teacher-forced)
+2. Harmonicity and voice-leading metrics
+3. Compare with existing interleaved model and TonicNet
+
+## Resolved design decisions
+
+- **Simultaneous onset ordering:** When merging voices chronologically,
+  events at the same musical time are ordered S before B before A
+  before T.  This is consistent during training and generation.
+
+- **Musical time embedding base frequency:** Start with base=100
+  (good resolution for 0–60 QN range).  Tune if needed.
+
+- **Single softmax vs factored heads:** The cascade vocab (~110 tokens)
+  is small enough for a single output softmax.  No need for the
+  type+value factored heads used in the interleaved pipeline (~2400
+  tokens).
+
 ## Open questions
 
-1. **Musical time embedding resolution.** The sinusoidal encoding has
-   a natural frequency range.  Do we need to tune the base frequency
-   for musical timescales (beats, bars) vs the default 10000 used in
-   NLP positional encodings?  Likely yes — musical time spans ~0–60 QN,
-   not thousands of tokens.
-
-2. **Soprano source.** Should the soprano model generate freely, or
+1. **Soprano source.** Should the soprano model generate freely, or
    should we seed it with a known hymn tune (as Bach did)?  Seeding
    makes evaluation more comparable to TonicNet's harmonization task.
 
-3. **Chord conditioning.** Should we add an explicit chord stage before
+2. **Chord conditioning.** Should we add an explicit chord stage before
    the soprano?  This creates a 5-stage cascade: Chords → S → B → A → T.
    The chord model could be very simple (HMM or small transformer).
 
-4. **Error propagation.** How badly do soprano mistakes degrade the
+3. **Error propagation.** How badly do soprano mistakes degrade the
    inner voices?  Scheduled sampling during training should help, but
    we'll need to measure this empirically.
-
-5. **Time-shift quantization for context merge.** When merging voices
-   chronologically, simultaneous onsets (Δ=0 between voices) are common
-   in chorales.  Should we enforce a canonical voice ordering for
-   simultaneous events (S before B before A before T)?  Likely yes, for
-   consistency during training.
