@@ -16,6 +16,26 @@ bash setup.bash                    # uv-based venv in .venv-ai-music (Python 3.1
 source .venv-ai-music/bin/activate
 ```
 
+### Data Setup
+
+The `data/` directory is not checked in. Populate it before running any pipeline.
+
+**Blues MIDIs** (GigaMIDI):
+```bash
+make gigamidi-fetch              # downloads ~1000 blues MIDIs into data/blues_midi/
+```
+
+**Bach Chorales** (JSB Chorales via TonicNet):
+```bash
+# Download Jsb16thSeparated.npz from the TonicNet repo:
+curl -L -o data/Jsb16thSeparated.npz \
+  https://github.com/omarperacha/TonicNet/raw/master/dataset_unprocessed/Jsb16thSeparated.npz
+make chorale-convert             # converts NPZ → 305 MIDI files in data/chorales_midi/
+```
+
+**Audio files** (for the full audio→MIDI pipeline):
+Place `.wav` files in `data/raw/` and use `scripts/run_end_to_end.sh`.
+
 ### Full Pipeline
 ```bash
 scripts/run_end_to_end.sh                              # all instruments
@@ -73,12 +93,15 @@ Six fixed instrument labels: `voxlead`, `voxharm`, `guitar`, `other`, `bass`, `d
 - **Training data** (`events_*.pkl`): Pickled event sequences (only load from trusted sources)
 - **Checkpoints** (`.pt`): `torch.save()` dict with model state + vocab + config metadata
 
-### Output Directories (all git-ignored)
+### Data & Output Directories (all git-ignored)
+- `data/Jsb16thSeparated.npz` — JSB Chorales dataset (from TonicNet)
+- `data/blues_midi/` — GigaMIDI blues MIDIs
+- `data/chorales_midi/` — converted Bach chorale MIDIs
+- `data/raw/` — input audio files (for full audio→MIDI pipeline)
 - `out_midis/` — exported MIDIs from audio→MIDI stage
 - `runs/events/` — preprocessed event datasets
 - `runs/checkpoints/` — trained model checkpoints
 - `runs/generated/` — generated MIDI outputs
-- `data/raw/` — input audio files
 
 ## Security Notes
 
