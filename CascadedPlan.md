@@ -53,47 +53,103 @@ events — but it's an extra burden on the model.
 **Cons:** Time alignment is learned, not structural.  Prefix grows
 linearly with number of conditioning voices.
 
-### Option B: Time-aligned interleaved prefix
+### Option B: Chronological merge with time-shifts
 
-Interleave conditioning voices by timestep on a shared time grid, then
-generate the target voice timestep by timestep:
+Merge all conditioning voices into a single chronological event stream
+ordered by onset time, using time-shifts (deltas) between events:
 
 ```
-Context (fixed, from completed voices):
-  [t=0 S:C5 B:C3] [t=1 S:D5 B:B2] [t=2 S:E5 B:A2] ...
+Context (soprano + bass merged by onset time):
+  Δ0 S:C5  Δ0 B:C3  Δ3 S:D5  Δ1 B:G2  Δ2 S:E5  Δ0 B:C3 ...
 
-Target (autoregressive):
-  [t=0 A:E4] [t=1 A:F4] [t=2 A:...] → predict next
+Target (alto, autoregressive):
+  [SEP] Δ0 A:E4  Δ2 A:F4  Δ4 A:... → predict next
 ```
 
-Time alignment is explicit — each timestep groups all voices together.
-The model attends to `[t=7 S:__ B:__]` when predicting `[t=7 A:__]`.
+Events from all conditioning voices appear in a single timeline.
+Time-shifts encode the delta to the next event, regardless of which
+voice it belongs to.  This is compact — voices with long held notes
+contribute no tokens during the hold.
 
-This is essentially TonicNet's encoding applied to the conditioning
-voices.  It works naturally for chorales (fixed 16th-note grid) but
-assumes a shared time grid.
+**The alignment problem:** the target voice's timeline and the
+context's timeline must be synchronized.  If the alto model has
+generated Δ2+Δ4=6 beats into the piece, it needs to attend to context
+events near cumulative time = 6.  Three sub-approaches:
 
-**Token budget:** ~2 tokens per conditioning voice per timestep (voice
-tag + pitch), so the alto model sees ~2×150 (context) + ~150 (target)
-= ~450 tokens for a full chorale.  Very efficient.
+**B1. Learned alignment.** Trust the model to learn cumulative
+time-shift tracking through self-attention.  Transformers can learn
+this, but it's an implicit burden — the model must compute running
+sums to discover which context events are "now."
 
-**Pros:** Explicit time alignment, compact, musically transparent.
-**Cons:** Requires a shared time grid (fine for chorales, breaks for
-free-rhythm music).  Mixes two different token formats (interleaved
-context vs sequential target).
+**B2. Absolute time annotations.** Add absolute beat-position tokens
+alongside time-shifts:
+
+```
+Δ0 @0 S:C5   Δ0 @0 B:C3   Δ3 @3 S:D5   Δ1 @4 B:G2 ...
+   [SEP]
+Δ0 @0 A:E4   Δ2 @2 A:F4   Δ4 @6 A:...
+```
+
+The `@N` tokens are redundant (computable from cumulative Δ) but give
+the model explicit anchors.  When generating alto at `@6`, attention
+can directly match `@6` in the context.  Costs ~1 extra token per
+event.
+
+**B3. Musical time embedding (recommended).** Instead of discrete
+time tokens, add a continuous sinusoidal embedding indexed by
+cumulative musical time — analogous to positional encoding but on a
+musical clock rather than token position:
+
+```python
+# Standard positional encoding: token index i
+pe[i] = sin(i / 10000^(2k/d))
+
+# Musical time encoding: cumulative beat position t
+te[i] = sin(t_i / 10000^(2k/d))
+```
+
+Each token gets both embeddings:
+```python
+token_repr = token_embedding + token_position_encoding + musical_time_encoding
+```
+
+Events at the same musical time get similar time embeddings regardless
+of where they sit in the token sequence.  No extra tokens, no grid
+assumption.  The `musical_time` values are precomputed by accumulating
+time-shifts during preprocessing and stored alongside the token IDs.
+
+**Why B3 is the best alignment mechanism:**
+- Zero token overhead (embedded, not tokenized)
+- Works for arbitrary rhythms and rubato, not just fixed grids
+- Alignment is structural (same beat → similar embedding) not learned
+- Naturally extends to cross-attention (Option C): encoder and decoder
+  share the same musical time embedding space, so cross-attention
+  weights can align by beat position without any explicit annotation
+
+**Token budget:** compact because only note onsets appear — a voice
+sustaining a half note contributes 0 tokens during the hold.  Typical
+alto model context: ~150 (S events) + ~150 (B events) + ~200 (A so
+far) = ~500 tokens.  Fits in 512 or 1024.
+
+**Pros:** Compact (no rest/sustain tokens), handles irregular rhythms,
+musical time embedding gives structural alignment for free.
+**Cons:** Slightly more complex preprocessing (accumulate times, merge
+and sort events across voices).
 
 ### Option C: Cross-attention into conditioning voices
 
 Separate the architecture into an encoder for conditioning voices and
 a decoder for the target voice.  The decoder cross-attends into the
-encoder's output.
+encoder's output.  Both sides use the same musical time embedding
+from B3, so cross-attention weights naturally align by beat position.
 
 ```
 ┌─────────────────────────────────────────────────┐
 │  Conditioning encoder (shared across stages)    │
 │                                                 │
-│  Input: time-interleaved completed voices       │
-│    [t=0 S:C5 B:C3] [t=1 S:D5 B:B2] ...       │
+│  Input: chronological merge of completed voices │
+│    Δ0 S:C5  Δ0 B:C3  Δ3 S:D5  Δ1 B:G2 ...   │
+│  Embeddings: token + token_position + mus_time  │
 │                                                 │
 │  Output: hidden states H_cond (T_c, D)         │
 └──────────────────────┬──────────────────────────┘
@@ -102,6 +158,7 @@ encoder's output.
 │  Voice decoder (one per voice, or shared+adapter)│
 │                                                 │
 │  Self-attention over target voice tokens so far │
+│  Embeddings: token + token_position + mus_time  │
 │  Cross-attention into H_cond at each layer      │
 │                                                 │
 │  Output: next token prediction for target voice │
@@ -110,18 +167,18 @@ encoder's output.
 
 **How multiple conditioning voices are handled:**
 
-The conditioning encoder takes ALL completed voices interleaved by
-timestep, producing a single sequence of hidden states.  The decoder
-doesn't need to know how many conditioning voices there are — it just
-cross-attends into whatever the encoder produced.
+The conditioning encoder takes ALL completed voices as a chronological
+merge (same format as Option B), producing a single sequence of hidden
+states.  The decoder doesn't need to know how many conditioning voices
+there are — it just cross-attends into whatever the encoder produced.
 
 This means the same decoder architecture works for all stages:
 - Stage 2 (bass): encoder sees soprano only
-- Stage 3 (alto): encoder sees soprano + bass interleaved
-- Stage 4 (tenor): encoder sees soprano + bass + alto interleaved
+- Stage 3 (alto): encoder sees soprano + bass merged
+- Stage 4 (tenor): encoder sees soprano + bass + alto merged
 
 The encoder grows by ~150 tokens per added voice.  The decoder stays
-the same size (~300–400 tokens for the full target voice).
+the same size (~200–300 tokens for the full target voice).
 
 **Why cross-attention suits this problem:**
 
@@ -129,10 +186,11 @@ the same size (~300–400 tokens for the full target voice).
    of the harmonic context.  The decoder focuses on voice-leading for
    its specific voice.  Neither needs to parse the other's token format.
 
-2. **Temporal alignment via attention.** Cross-attention weights
-   naturally learn to align: when generating alto at t=7, the decoder
-   attends most strongly to encoder positions near t=7.  No explicit
-   time grid needed, though having one helps.
+2. **Temporal alignment via musical time embedding.** Both encoder and
+   decoder use the same sinusoidal musical time embedding.  When the
+   decoder generates a note at beat 6, its musical time embedding is
+   similar to encoder tokens near beat 6.  Cross-attention weights
+   align by beat position automatically — no explicit time grid needed.
 
 3. **Scalable to N voices.** Adding a 5th conditioning voice just adds
    ~150 tokens to the encoder input.  The decoder is unchanged.
@@ -149,30 +207,39 @@ encoder-only).
 
 ### Recommendation
 
-**Start with Option B (time-aligned interleaving), plan for C.**
+**Start with Option B + B3 (chronological merge with musical time
+embedding), plan for C.**
 
-Option B is the fastest to implement — it reuses the existing
-encoder-only transformer and just changes the tokenization.  The
-chorale time grid makes alignment trivial.  If we later need to handle
-free-rhythm music or want cleaner separation, we migrate to
-cross-attention (Option C) using the same interleaved encoding for the
-conditioning side.
+Option B reuses the existing encoder-only transformer — just changes
+the tokenization and adds a musical time embedding.  The B3 embedding
+provides structural alignment without a fixed grid, so the approach
+works for both chorales and free-rhythm music from the start.
+
+If we later want cleaner separation of conditioning from generation,
+we migrate to cross-attention (Option C).  The chronological merge
+format and musical time embedding carry over unchanged — only the
+model architecture changes (encoder-only → encoder-decoder).
 
 ## Per-voice token vocabulary
 
 Each voice model needs a much smaller vocabulary than the full pipeline:
 
-| Token type   | Size | Notes                            |
-|--------------|------|----------------------------------|
-| PAD          | 1    |                                  |
-| BOS          | 1    |                                  |
-| EOS          | 1    |                                  |
-| BAR          | 1    | Bar boundary marker              |
-| TIME_SHIFT   | 16   | 16th-note grid, max 1 bar       |
-| PITCH        | ~30  | Voice-specific range (see below) |
-| REST         | 1    | Silence at this timestep         |
-| VOX_S/B/A/T  | 1–3  | Voice boundary tags (Option B)   |
-| **Total**    | ~55  | Per-voice model                  |
+| Token type   | Size | Notes                                 |
+|--------------|------|---------------------------------------|
+| PAD          | 1    |                                       |
+| BOS          | 1    |                                       |
+| EOS          | 1    |                                       |
+| SEP          | 1    | Boundary between context and target   |
+| BAR          | 1    | Bar boundary marker                   |
+| TIME_SHIFT   | 48   | 1/24-QN steps, max 2 QN (half note)   |
+| PITCH        | ~30  | Voice-specific range (see below)      |
+| REST         | 1    | Explicit silence event                |
+| VOX_S/B/A/T  | 4    | Voice tags in conditioning context    |
+| **Total**    | ~90  | Shared across all voice models        |
+
+TIME_SHIFT tokens encode deltas (time to next event), not grid
+positions.  The 1/24-QN resolution matches the existing pipeline and
+handles both straight and triplet rhythms.
 
 Voice-specific pitch ranges (from existing `pre.py` config):
 
@@ -184,17 +251,38 @@ Voice-specific pitch ranges (from existing `pre.py` config):
 | Bassvox  | 33–69      | 36        | 37           |
 
 VEL and DUR tokens can likely be omitted for chorales — velocity is
-uniform and duration is implied by the grid (note-on to next note-on
-or rest).
+uniform and duration is implicit (note-on to next note-on or rest in
+the same voice).
+
+### Musical time embedding
+
+In addition to the token vocabulary, each token carries a precomputed
+musical time value (cumulative beat position as a float).  This is
+encoded as a sinusoidal embedding added to the token representation:
+
+```python
+token_repr = token_embedding[tok_id]
+           + position_encoding[tok_pos]     # token sequence position
+           + musical_time_encoding[mus_t]   # cumulative beat position
+```
+
+The `musical_time_encoding` uses the same sinusoidal formula as
+standard positional encoding but indexed by continuous musical time
+(in quarter notes) rather than discrete token index.  This provides
+structural temporal alignment across context and target voice streams
+without any extra tokens or grid assumptions.
 
 ## Training procedure
 
 **Data preparation:**
 1. Parse each chorale MIDI into 4 separate voice sequences
-2. Quantize to 16th-note grid (already done in NPZ source data)
-3. Encode each voice as: `[BOS] TIME PITCH TIME PITCH ... [EOS]`
-4. For voice N, prepend the conditioning context (Option B encoding)
-5. Augment: transpose ±3 semitones (7x), checking voice ranges
+2. Encode each voice as: `Δt PITCH Δt PITCH ... [EOS]`
+   (time-shifts between consecutive note onsets in that voice)
+3. Compute cumulative musical time for each token
+4. For voice N, build conditioning context by chronologically merging
+   voices 1..N-1 with voice tags: `Δ0 [S] PITCH Δ0 [B] PITCH Δ3 [S] PITCH ...`
+5. Concatenate: `[BOS] context [SEP] target_voice [EOS]`
+6. Augment: transpose ±3 semitones (7x), checking voice ranges
 
 **Training:**
 - Teacher forcing: conditioning voices are ground truth during training
@@ -211,32 +299,36 @@ Teaches the model to be robust to imperfect conditioning inputs.
 ## Generation procedure
 
 ```
-1. Generate soprano:
-   soprano_model([BOS]) → s₁ s₂ ... [EOS]
+1. Generate soprano (no conditioning):
+   model([BOS] [SEP]) → Δt₁ P₁ Δt₂ P₂ ... [EOS]
+   Compute cumulative musical times for soprano tokens.
 
-2. Encode soprano as context:
-   ctx = interleave_by_timestep([soprano])
+2. Build context from soprano:
+   ctx = chronological_merge([soprano], voice_tags=[[S]])
 
-3. Generate bass:
-   bass_model([ctx] [SEP] [BOS]) → b₁ b₂ ... [EOS]
+3. Generate bass (conditioned on soprano):
+   model([BOS] ctx [SEP]) → Δt₁ P₁ Δt₂ P₂ ... [EOS]
+   Musical time embedding keeps bass aligned with soprano context.
 
-4. Encode soprano + bass as context:
-   ctx = interleave_by_timestep([soprano, bass])
+4. Build context from soprano + bass:
+   ctx = chronological_merge([soprano, bass], voice_tags=[[S],[B]])
 
-5. Generate alto:
-   alto_model([ctx] [SEP] [BOS]) → a₁ a₂ ... [EOS]
+5. Generate alto (conditioned on soprano + bass):
+   model([BOS] ctx [SEP]) → Δt₁ P₁ ... [EOS]
 
-6. Encode soprano + bass + alto as context:
-   ctx = interleave_by_timestep([soprano, bass, alto])
+6. Build context from soprano + bass + alto:
+   ctx = chronological_merge([soprano, bass, alto], voice_tags=[[S],[B],[A]])
 
-7. Generate tenor:
-   tenor_model([ctx] [SEP] [BOS]) → t₁ t₂ ... [EOS]
+7. Generate tenor (conditioned on all three):
+   model([BOS] ctx [SEP]) → Δt₁ P₁ ... [EOS]
 
-8. Merge 4 voice sequences → multi-track MIDI
+8. Convert each voice's time-shift + pitch sequence to absolute
+   note events, merge into multi-track MIDI.
 ```
 
 Total generation: 4 sequential forward passes.  Each is fast (small
-model, short sequences).
+model, short sequences).  Musical time embedding is recomputed for
+the context at each stage (cumulative sum of the merged time-shifts).
 
 ## Shared vs independent weights
 
@@ -292,9 +384,11 @@ To fairly compare the cascaded pipeline with TonicNet:
 
 ## Open questions
 
-1. **Grid assumption.** The 16th-note grid works for chorales.  For
-   extending to other genres, we'd need to handle variable timing —
-   motivating the eventual move to cross-attention (Option C).
+1. **Musical time embedding resolution.** The sinusoidal encoding has
+   a natural frequency range.  Do we need to tune the base frequency
+   for musical timescales (beats, bars) vs the default 10000 used in
+   NLP positional encodings?  Likely yes — musical time spans ~0–60 QN,
+   not thousands of tokens.
 
 2. **Soprano source.** Should the soprano model generate freely, or
    should we seed it with a known hymn tune (as Bach did)?  Seeding
@@ -307,3 +401,9 @@ To fairly compare the cascaded pipeline with TonicNet:
 4. **Error propagation.** How badly do soprano mistakes degrade the
    inner voices?  Scheduled sampling during training should help, but
    we'll need to measure this empirically.
+
+5. **Time-shift quantization for context merge.** When merging voices
+   chronologically, simultaneous onsets (Δ=0 between voices) are common
+   in chorales.  Should we enforce a canonical voice ordering for
+   simultaneous events (S before B before A before T)?  Likely yes, for
+   consistency during training.
