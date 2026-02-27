@@ -197,7 +197,7 @@ cascade-generate: $(CASCADE_CKPT) ## Generate from cascade model
 	  --ckpt $(CASCADE_CKPT) \
 	  --vocab_json "$$CASCADE_VOCAB" \
 	  --out_midi runs/generated/cascade_out.mid \
-	  --device auto $(ARGS)
+	  --device cpu $(ARGS)
 
 cascade-eval: ## Evaluate cascade-generated MIDI
 	@CASCADE_VOCAB=$$(ls -t runs/cascade_events_*/cascade_vocab.json 2>/dev/null | head -1); \
@@ -235,7 +235,7 @@ chorale-cascade-generate: $(CHORALE_CASCADE_CKPT) ## Generate chorale from casca
 	  --ckpt $(CHORALE_CASCADE_CKPT) \
 	  --vocab_json $(CHORALE_CASCADE_EVENTS)/cascade_vocab.json \
 	  --out_midi runs/generated/chorale_cascade_out.mid \
-	  --device auto --ablation A --instrument_set chorale4 $(ARGS)
+	  --device cpu --ablation A --instrument_set chorale4 $(ARGS)
 
 chorale-cascade-eval: ## Evaluate chorale cascade-generated MIDI
 	$(PYTHON) training/eval_cascade.py \
