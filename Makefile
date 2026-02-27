@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -242,3 +242,35 @@ chorale-cascade-eval: ## Evaluate chorale cascade-generated MIDI
 	  --midi runs/generated/chorale_cascade_out.mid \
 	  --vocab_json $(CHORALE_CASCADE_EVENTS)/cascade_vocab.json \
 	  --instrument_set chorale4 $(ARGS)
+
+# --- Dense chorale pipeline (NPZ → dense tokens → train → generate) ---
+
+CHORALE_DENSE_EVENTS := runs/chorale_dense_events
+CHORALE_DENSE_CKPT   := runs/checkpoints/chorale_dense_model.pt
+
+chorale-dense-preprocess: ## Dense preprocess: NPZ → compact token sequences
+	$(PYTHON) training/pre_chorale_dense.py \
+	  --npz $(CHORALE_NPZ) --data_folder $(CHORALE_DENSE_EVENTS) $(ARGS)
+
+chorale-dense-train: $(CHORALE_DENSE_EVENTS)/dense_train.pkl ## Train dense chorale Transformer
+	$(PYTHON) training/train_chorale_dense.py \
+	  --data_dir $(CHORALE_DENSE_EVENTS) \
+	  --save_path $(CHORALE_DENSE_CKPT) \
+	  --device auto $(ARGS)
+
+chorale-dense-resume: $(CHORALE_DENSE_CKPT) ## Resume dense chorale training
+	$(PYTHON) training/train_chorale_dense.py \
+	  --data_dir $(CHORALE_DENSE_EVENTS) \
+	  --save_path $(CHORALE_DENSE_CKPT) \
+	  --resume $(CHORALE_DENSE_CKPT) \
+	  --device auto $(ARGS)
+
+$(CHORALE_DENSE_EVENTS)/dense_train.pkl:
+	$(PYTHON) training/pre_chorale_dense.py \
+	  --npz $(CHORALE_NPZ) --data_folder $(CHORALE_DENSE_EVENTS)
+
+chorale-dense-generate cdg: $(CHORALE_DENSE_CKPT) ## Generate dense chorale MIDI
+	$(PYTHON) training/generate_chorale_dense.py \
+	  --ckpt $(CHORALE_DENSE_CKPT) \
+	  --out_midi runs/generated/chorale_dense_out.mid \
+	  --device auto $(ARGS)
