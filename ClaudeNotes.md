@@ -706,5 +706,63 @@ Plan: Chorale key normalization + remove transposition augmentation
 ---
 
 
+  Token prediction (the main task)
+
+  - loss = weighted combination of type + value cross-entropy losses: 0.2 * type_loss + 0.8 * value_loss. This is what drives the gradient (along with the small aux
+   term).
+  - ppl (perplexity) = exp(loss). Measures how "surprised" the model is -- a ppl of 3.67 means on average the model is as uncertain as choosing among ~3.7 equally
+  likely options. Lower is better; 1.0 would mean perfect prediction.
+  - acc = exact token accuracy -- fraction of tokens where the model predicts both the correct type and the correct value. Your 43.4% val accuracy means it nails the
+   full token about 2 in 5 times.
+  - type_acc = accuracy on just the event type (TIME_SHIFT, BAR, INST, VEL, PITCH, DUR). At 87.3% val, the model has largely learned the grammar/event order.
+  - val_acc = accuracy on just the value within each type (which pitch, which velocity, which duration, etc.). At 50.3% val, this is the harder part -- predicting
+  the exact musical content.
+
+  Auxiliary head (polyphony instructor)
+
+  - aux_loss = weighted Huber loss on a 24-dim vector (for chorale4) that describes the polyphonic texture of each 512-token window -- note density, interval
+  distributions, etc. Scaled by 0.05 in the total loss, so it's a gentle regularizer.
+  - aux_mae = mean absolute error on that same aux vector. At 0.08, the model's polyphony predictions are off by ~0.08 on average (values are normalized, so this is
+   quite good).
+
+  Train vs Val
+
+  Each metric is reported for both train (what the model learns on) and val (held-out chorales it hasn't seen). Your val metrics are slightly better than train,
+  which is unusual but can happen with small datasets -- it means no overfitting, which is good.
+
+  The bottom line
+
+  Your model has learned the event grammar well (87% type accuracy) and is making reasonable musical predictions (50% value accuracy). The gap between type_acc and
+  val_acc is where the musical challenge lives -- getting the exact pitch/duration/velocity right.
+  
+------------------------------------------------------------------------------------------------------------------------
+2026-02-27 13:58
+
+⏺ Training is progressing well. Here's the summary after 42 epochs:
+
+  ┌────────────────┬─────────┬──────────┬─────────────────────────────┐
+  │     Metric     │ Epoch 1 │ Epoch 42 │            Trend            │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Val loss       │ 4.405   │ 0.586    │ Steadily falling            │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Val perplexity │ 81.85   │ 1.80     │ Near-perfect                │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Val accuracy   │ 3.5%    │ 84.2%    │ Excellent                   │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Chord acc      │ 4.6%    │ 88.7%    │                             │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Soprano acc    │ 0.7%    │ 84.0%    │                             │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Bass acc       │ 6.9%    │ 88.6%    │                             │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Alto acc       │ 4.9%    │ 86.7%    │                             │
+  ├────────────────┼─────────┼──────────┼─────────────────────────────┤
+  │ Tenor acc      │ 0.6%    │ 73.3%    │ Weakest but still improving │
+  └────────────────┴─────────┴──────────┴─────────────────────────────┘
+
+  The model is learning fast -- val perplexity of 1.80 and 84% accuracy at epoch 42. Loss is still improving every epoch (no patience countdown yet). Epochs take ~6-10 minutes each, with one outlier at 28 minutes (epoch 42).
+
+  Tenor is the weakest voice at 73%, which makes sense -- it's the last in the sequence and the most constrained by the other three voices. It's still improving steadily.
+
 ------------------------------------------------------------------------------------------------------------------------
 ------------------------------------------------------------------------------------------------------------------------
