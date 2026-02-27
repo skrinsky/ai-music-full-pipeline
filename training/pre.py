@@ -1025,11 +1025,14 @@ def compact_vocab(
         used_globals.update(seq)
 
     # -- Step 2: per-group used locals & remapping --
-    # Data-driven: only include groups that exist in old_layout
-    GROUP_ORDER = [g for g in ["PAD", "BOS", "EOS", "BAR", "TIME_SHIFT", "INST",
-                               "VEL", "DUR", "PITCH_GENERAL", "PITCH_DRUMS"]
-                   if g in old_layout]
-    KEEP_GROUPS = {"PAD", "BOS", "EOS", "INST"}
+    # Core groups in canonical order, then any extra groups (e.g. SEP, CHORD_*)
+    _CORE_ORDER = ["PAD", "BOS", "EOS", "BAR", "TIME_SHIFT", "INST",
+                   "VEL", "DUR", "PITCH_GENERAL", "PITCH_DRUMS"]
+    GROUP_ORDER = [g for g in _CORE_ORDER if g in old_layout]
+    extra_groups = [g for g in old_layout if g not in _CORE_ORDER]
+    extra_groups.sort(key=lambda g: old_layout[g]["start"])
+    GROUP_ORDER.extend(extra_groups)
+    KEEP_GROUPS = {"PAD", "BOS", "EOS", "INST"} | set(extra_groups)
     COMPACT_GROUPS = [g for g in GROUP_ORDER if g not in KEEP_GROUPS]
 
     old_to_new_local: Dict[str, Dict[int, int]] = {}

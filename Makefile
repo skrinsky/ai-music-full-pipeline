@@ -4,6 +4,7 @@
 VENV_DIR := .venv-ai-music
 ACTIVATE := $(VENV_DIR)/bin/activate
 PYTHON := $(VENV_DIR)/bin/python
+export PYTHONPATH := $(CURDIR)
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+( [a-zA-Z_-]+)*:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
