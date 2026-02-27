@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -204,3 +204,40 @@ cascade-eval: ## Evaluate cascade-generated MIDI
 	$(PYTHON) training/eval_cascade.py \
 	  --midi runs/generated/cascade_out.mid \
 	  --vocab_json "$$CASCADE_VOCAB" $(ARGS)
+
+# --- Chorale cascade pipeline (bassvox → tenor → alto → soprano) ---
+
+CHORALE_CASCADE_EVENTS := runs/chorale_cascade_events
+CHORALE_CASCADE_CKPT   := runs/checkpoints/chorale_cascade_model.pt
+
+chorale-cascade-preprocess: data/chorales_midi/.converted ## Cascade preprocess chorales (bassvox→tenor→alto→soprano)
+	$(PYTHON) training/pre_cascade.py \
+	  --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_CASCADE_EVENTS) \
+	  --ablation A --instrument_set chorale4 $(ARGS)
+
+chorale-cascade-train: $(CHORALE_CASCADE_EVENTS)/cascade_train.pkl ## Train chorale cascade model
+	$(PYTHON) training/train_cascade.py \
+	  --data_dir $(CHORALE_CASCADE_EVENTS) \
+	  --train_pkl $(CHORALE_CASCADE_EVENTS)/cascade_train.pkl \
+	  --val_pkl $(CHORALE_CASCADE_EVENTS)/cascade_val.pkl \
+	  --vocab_json $(CHORALE_CASCADE_EVENTS)/cascade_vocab.json \
+	  --save_path $(CHORALE_CASCADE_CKPT) \
+	  --device auto $(ARGS)
+
+$(CHORALE_CASCADE_EVENTS)/cascade_train.pkl: data/chorales_midi/.converted
+	$(PYTHON) training/pre_cascade.py \
+	  --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_CASCADE_EVENTS) \
+	  --ablation A --instrument_set chorale4
+
+chorale-cascade-generate: $(CHORALE_CASCADE_CKPT) ## Generate chorale from cascade model
+	$(PYTHON) training/generate_cascade.py \
+	  --ckpt $(CHORALE_CASCADE_CKPT) \
+	  --vocab_json $(CHORALE_CASCADE_EVENTS)/cascade_vocab.json \
+	  --out_midi runs/generated/chorale_cascade_out.mid \
+	  --device auto --ablation A $(ARGS)
+
+chorale-cascade-eval: ## Evaluate chorale cascade-generated MIDI
+	$(PYTHON) training/eval_cascade.py \
+	  --midi runs/generated/chorale_cascade_out.mid \
+	  --vocab_json $(CHORALE_CASCADE_EVENTS)/cascade_vocab.json \
+	  --instrument_set chorale4 $(ARGS)

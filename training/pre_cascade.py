@@ -52,6 +52,32 @@ CASCADE_ORDER_A = ["drums", "bass", "guitar", "other", "voxlead", "voxharm"]
 CASCADE_ORDER_B = ["drums", "bass", "guitar", "voxlead", "voxharm"]
 # In ablation B, "other" events are relabeled to "guitar" index
 
+# Chorale cascade: bass voice first (harmonic foundation), then up
+CASCADE_ORDER_CHORALE = ["bassvox", "tenor", "alto", "soprano"]
+
+# Registry: instrument_set → {ablation_name: order_list}
+CASCADE_ORDERS: Dict[str, Dict[str, list]] = {
+    "blues6": {"A": CASCADE_ORDER_A, "B": CASCADE_ORDER_B},
+    "chorale4": {"A": CASCADE_ORDER_CHORALE},
+}
+
+
+def get_cascade_order(instrument_set: str, ablation: str) -> list:
+    """Look up cascade order for a given instrument set and ablation."""
+    orders = CASCADE_ORDERS.get(instrument_set)
+    if orders is None:
+        raise ValueError(
+            f"No cascade order defined for instrument_set='{instrument_set}'. "
+            f"Known: {list(CASCADE_ORDERS.keys())}"
+        )
+    order = orders.get(ablation)
+    if order is None:
+        raise ValueError(
+            f"No ablation '{ablation}' for instrument_set='{instrument_set}'. "
+            f"Known: {list(orders.keys())}"
+        )
+    return order
+
 SEQ_LEN = 1024
 SEQ_STRIDE = 512
 
@@ -368,17 +394,13 @@ def build_all_cascade_stages(
     config: InstrumentConfig,
     chord_labels: List[Tuple[float, int, int]],
     ablation: str,
+    instrument_set: str = "blues6",
 ) -> List[Tuple[List[int], List[float], int, int]]:
     """Build all cascade stages for one song.
 
     Returns list of (tokens, musical_times, sep_pos, stage_id) tuples.
     """
-    if ablation == "A":
-        order = CASCADE_ORDER_A
-    elif ablation == "B":
-        order = CASCADE_ORDER_B
-    else:
-        raise ValueError(f"Unknown ablation: {ablation}")
+    order = get_cascade_order(instrument_set, ablation)
 
     # Split events by instrument
     by_inst = split_events_by_instrument(ev, config)
@@ -450,7 +472,7 @@ def main():
     ap = argparse.ArgumentParser("pre_cascade: cascade preprocessing for multi-instrument generation.")
     ap.add_argument("--midi_folder", required=True, help="Folder containing per-song multi-track MIDI files.")
     ap.add_argument("--data_folder", required=True, help="Output folder for cascade pickles + vocab.")
-    ap.add_argument("--ablation", default="A", choices=["A", "B"], help="Ablation variant (A=6 stages, B=5 stages with merged guitar+other).")
+    ap.add_argument("--ablation", default="A", help="Ablation variant (blues6: A=6 stages, B=5 merged; chorale4: A only).")
     ap.add_argument("--instrument_set", default="blues6", choices=list(INSTRUMENT_PRESETS.keys()),
                     help="Preset instrument configuration (default: blues6).")
     ap.add_argument("--blues_only", action="store_true", help="Filter out non-bluesy songs.")
@@ -459,9 +481,13 @@ def main():
     args = ap.parse_args()
 
     seq_len = args.seq_len
-    config = make_instrument_config(INSTRUMENT_PRESETS[args.instrument_set])
+    instrument_set = args.instrument_set
+    config = make_instrument_config(INSTRUMENT_PRESETS[instrument_set])
+
+    # Validate ablation is defined for this instrument set
+    cascade_order = get_cascade_order(instrument_set, args.ablation)
     print(f"Instrument config: {config.names} (drums={config.drum_idx})")
-    print(f"Ablation: {args.ablation}")
+    print(f"Ablation: {args.ablation}  order: {cascade_order}")
 
     os.makedirs(args.data_folder, exist_ok=True)
     samples_dir = os.path.join(args.data_folder, "_samples")
@@ -550,6 +576,7 @@ def main():
                 stages = build_all_cascade_stages(
                     ev_local, tempo, bar_starts, bars_meta,
                     vocab, config, chord_labels, args.ablation,
+                    instrument_set=instrument_set,
                 )
                 for (tokens, times, sep_pos, stage_id) in stages:
                     all_seqs.append(tokens)
@@ -621,7 +648,7 @@ def main():
     stage_counts = {}
     for sid in train_stages:
         stage_counts[sid] = stage_counts.get(sid, 0) + 1
-    order = CASCADE_ORDER_A if args.ablation == "A" else CASCADE_ORDER_B
+    order = cascade_order
     for sid, name in enumerate(order):
         cnt = stage_counts.get(sid, 0)
         print(f"  Stage {sid} ({name:>8}):  {cnt} examples")

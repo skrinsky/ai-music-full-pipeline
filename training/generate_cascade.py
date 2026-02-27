@@ -43,6 +43,7 @@ from training.generate import (
 from training.pre_cascade import (
     CASCADE_ORDER_A,
     CASCADE_ORDER_B,
+    get_cascade_order,
     extract_chord_labels,
     inject_chord_tokens,
     compute_musical_times,
@@ -57,7 +58,8 @@ def get_args():
     ap.add_argument("--out_midi", required=True, help="Output .mid path")
     ap.add_argument("--out_meta_json", default="", help="Optional metadata JSON")
 
-    ap.add_argument("--ablation", default="A", choices=["A", "B"])
+    ap.add_argument("--ablation", default="A")
+    ap.add_argument("--instrument_set", default="blues6", help="Instrument preset (blues6, chorale4)")
     ap.add_argument("--max_tokens_per_stage", type=int, default=1500)
     ap.add_argument("--temperature", type=float, default=0.9)
     ap.add_argument("--top_p", type=float, default=0.9)
@@ -329,11 +331,8 @@ def generate_cascade(args):
     starts = {k: layout[k]["start"] for k in type_names}
 
     canonical_names = vocab.get("instrument_names", CASCADE_ORDER_A)
-
-    if args.ablation == "A":
-        order = CASCADE_ORDER_A
-    else:
-        order = CASCADE_ORDER_B
+    instrument_set = args.instrument_set
+    order = get_cascade_order(instrument_set, args.ablation)
 
     # Collect generated events per instrument (as token sequences)
     all_generated: Dict[str, List[int]] = {}
@@ -352,9 +351,9 @@ def generate_cascade(args):
         decode_to_midi,
     )
 
-    config = make_instrument_config(INSTRUMENT_PRESETS.get(
-        "blues6", canonical_names
-    ))
+    config = make_instrument_config(
+        INSTRUMENT_PRESETS.get(instrument_set, canonical_names)
+    )
 
     t0 = time.time()
     for stage_id, inst_name in enumerate(order):
