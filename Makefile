@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -161,3 +161,46 @@ generate gen: ## Generate from latest checkpoint (ARGS="--seed_midi foo.mid --se
 	  --out_midi runs/generated/out.mid \
 	  --device auto $(ARGS)
 	open runs/generated/out.mid
+
+# --- Cascaded-by-instrument pipeline ---
+
+CASCADE_EVENTS_A := runs/cascade_events_a
+CASCADE_EVENTS_B := runs/cascade_events_b
+CASCADE_CKPT     := runs/checkpoints/cascade_model.pt
+
+cascade-preprocess-a: data/blues_midi/.fetched ## Cascade preprocess ablation A (6 stages)
+	$(PYTHON) training/pre_cascade.py \
+	  --midi_folder $(BLUES_MIDI) --data_folder $(CASCADE_EVENTS_A) \
+	  --ablation A --blues_only $(ARGS)
+
+cascade-preprocess-b: data/blues_midi/.fetched ## Cascade preprocess ablation B (5 stages, merged guitar+other)
+	$(PYTHON) training/pre_cascade.py \
+	  --midi_folder $(BLUES_MIDI) --data_folder $(CASCADE_EVENTS_B) \
+	  --ablation B --blues_only $(ARGS)
+
+cascade-train: ## Train cascade model (set CASCADE_DIR=runs/cascade_events_a or _b)
+	@test -n "$(CASCADE_DIR)" || { echo "ERROR: set CASCADE_DIR (e.g. CASCADE_DIR=runs/cascade_events_a)"; exit 1; }
+	$(PYTHON) training/train_cascade.py \
+	  --data_dir $(CASCADE_DIR) \
+	  --train_pkl $(CASCADE_DIR)/cascade_train.pkl \
+	  --val_pkl $(CASCADE_DIR)/cascade_val.pkl \
+	  --vocab_json $(CASCADE_DIR)/cascade_vocab.json \
+	  --save_path $(CASCADE_CKPT) \
+	  --device auto $(ARGS)
+
+cascade-generate: $(CASCADE_CKPT) ## Generate from cascade model
+	@CASCADE_VOCAB=$$(ls -t runs/cascade_events_*/cascade_vocab.json 2>/dev/null | head -1); \
+	test -n "$$CASCADE_VOCAB" || { echo "ERROR: no cascade_vocab.json found"; exit 1; }; \
+	echo "Using vocab: $$CASCADE_VOCAB"; \
+	$(PYTHON) training/generate_cascade.py \
+	  --ckpt $(CASCADE_CKPT) \
+	  --vocab_json "$$CASCADE_VOCAB" \
+	  --out_midi runs/generated/cascade_out.mid \
+	  --device auto $(ARGS)
+
+cascade-eval: ## Evaluate cascade-generated MIDI
+	@CASCADE_VOCAB=$$(ls -t runs/cascade_events_*/cascade_vocab.json 2>/dev/null | head -1); \
+	test -n "$$CASCADE_VOCAB" || { echo "ERROR: no cascade_vocab.json found"; exit 1; }; \
+	$(PYTHON) training/eval_cascade.py \
+	  --midi runs/generated/cascade_out.mid \
+	  --vocab_json "$$CASCADE_VOCAB" $(ARGS)
