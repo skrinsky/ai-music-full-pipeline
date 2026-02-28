@@ -30,23 +30,28 @@ def prune_midi_tracks(midi_path: str, tracks_csv: str | None):
     pm.write(midi_path)
 
 def set_gm_programs(midi_path: str):
-    """Set GM program numbers based on instrument name so GM players pick
-    appropriate sounds.  pretty_midi uses 0-based GM programs.
+    """Set GM program numbers and rename tracks to GM instrument names.
 
-    Note: Logic Pro 12+ defaults to GM Device tracks on MIDI import.
-    Use Option-drag to import as Software Instrument tracks instead.
+    pretty_midi uses 0-based GM programs.  We also rename each track so
+    that Logic Pro (and other DAWs) show the instrument name instead of
+    the internal voice label.
+
+    Note: Logic Pro defaults to GM Device tracks on MIDI-file open.
+    To get Software Instrument tracks, drag the MIDI file into an
+    existing project instead of using File > Open.
     """
-    GM_BY_NAME = {
-        "bass": 33,     # Electric Bass (finger)
-        "guitar": 27,   # Electric Guitar (clean)
-        "other": 80,    # Lead 1 (square)
-        "voxlead": 52,  # Choir Aahs
-        "voxharm": 54,  # Synth Voice
+    GM_BY_NAME: dict[str, tuple[int, str]] = {
+        # voice  → (program, GM instrument name)
+        "bass":    (33, "Electric Bass"),
+        "guitar":  (27, "Electric Guitar"),
+        "other":   (80, "Lead Synth"),
+        "voxlead": (52, "Choir Aahs"),
+        "voxharm": (54, "Synth Voice"),
         # Chorale voices
-        "soprano": 73,  # Flute
-        "alto": 69,     # English Horn
-        "tenor": 71,    # Clarinet
-        "bassvox": 70,  # Bassoon
+        "soprano": (73, "Flute"),
+        "alto":    (69, "English Horn"),
+        "tenor":   (71, "Clarinet"),
+        "bassvox": (70, "Bassoon"),
     }
     pm = pretty_midi.PrettyMIDI(midi_path)
     changed = 0
@@ -55,10 +60,52 @@ def set_gm_programs(midi_path: str):
             continue
         nm = (inst.name or "").strip().lower()
         if nm in GM_BY_NAME:
-            inst.program = int(GM_BY_NAME[nm])
+            prog, gm_name = GM_BY_NAME[nm]
+            inst.program = int(prog)
+            inst.name = gm_name
             changed += 1
     if changed:
         pm.write(midi_path)
+
+
+# Default SoundFont search order
+_SF2_SEARCH = [
+    os.path.expanduser("~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2"),
+    "/usr/share/sounds/sf2/FluidR3_GM.sf2",
+    "/usr/local/share/soundfonts/default.sf2",
+]
+
+def find_soundfont() -> str | None:
+    for p in _SF2_SEARCH:
+        if os.path.isfile(p):
+            return p
+    return None
+
+def render_midi_to_wav(midi_path: str, wav_path: str | None = None,
+                       sample_rate: int = 44100) -> str | None:
+    """Render a MIDI file to WAV using FluidSynth + GM SoundFont.
+
+    Returns the WAV path on success, None if no SoundFont found.
+    """
+    import shutil, subprocess
+    if shutil.which("fluidsynth") is None:
+        print("WARNING: fluidsynth not found — skipping audio render.")
+        print("  Install via: brew install fluid-synth")
+        return None
+    sf2 = find_soundfont()
+    if sf2 is None:
+        print("WARNING: No GM SoundFont found — skipping audio render.")
+        print("  Install one at: ~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2")
+        return None
+    if wav_path is None:
+        wav_path = os.path.splitext(midi_path)[0] + ".wav"
+    subprocess.run(
+        ["fluidsynth", "-ni", "-F", wav_path, "-r", str(sample_rate),
+         sf2, midi_path],
+        check=True, capture_output=True,
+    )
+    print(f"Rendered audio → {wav_path}")
+    return wav_path
 
 
 def prune_midi_tracks(midi_path: str, tracks_csv: str | None):
@@ -671,8 +718,8 @@ def generate(args):
     prune_midi_tracks(args.out_midi, args.tracks)
 
     set_gm_programs(args.out_midi)
-    prune_midi_tracks(args.out_midi, args.tracks)
     print(f"Wrote MIDI → {args.out_midi}")
+    render_midi_to_wav(args.out_midi)
 
     return {
         "timestamp": datetime.utcnow().isoformat() + "Z",

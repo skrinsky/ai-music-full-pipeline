@@ -298,18 +298,19 @@ def decode_tokens_to_midi(tokens: list[int], path: str,
 
     pm = pretty_midi.PrettyMIDI(initial_tempo=bpm, resolution=960)
 
-    # GM programs for each voice
-    gm_programs = {
-        "soprano": 73,   # Flute
-        "bass":    70,    # Bassoon
-        "alto":    69,    # English Horn
-        "tenor":   71,    # Clarinet
+    # GM programs and instrument names for each voice
+    gm_voices: dict[str, tuple[int, str]] = {
+        "soprano": (73, "Flute"),
+        "bass":    (70, "Bassoon"),
+        "alto":    (69, "English Horn"),
+        "tenor":   (71, "Clarinet"),
     }
     voice_names = VOICE_ORDER_NAMES  # soprano, bass, alto, tenor
     instruments = {}
     for vname in voice_names:
-        inst = pretty_midi.Instrument(program=gm_programs[vname],
-                                       is_drum=False, name=vname)
+        prog, gm_name = gm_voices[vname]
+        inst = pretty_midi.Instrument(program=prog,
+                                       is_drum=False, name=gm_name)
         instruments[vname] = inst
 
     # Parse tokens: skip BOS, stop at EOS

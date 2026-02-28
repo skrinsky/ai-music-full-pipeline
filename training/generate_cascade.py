@@ -38,6 +38,7 @@ from training.generate import (
     snap_delta,
     fit_error,
     set_gm_programs,
+    render_midi_to_wav,
     nearest_multiple,
 )
 from training.pre_cascade import (
@@ -496,6 +497,7 @@ def generate_cascade(args):
 
     set_gm_programs(args.out_midi)
     print(f"Wrote MIDI → {args.out_midi}")
+    render_midi_to_wav(args.out_midi)
 
     # Metadata
     meta = {

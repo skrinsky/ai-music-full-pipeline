@@ -20,7 +20,7 @@ import sys
 
 import torch
 
-from training.generate import sample_from_logits, seed_everything, set_gm_programs
+from training.generate import sample_from_logits, seed_everything, set_gm_programs, render_midi_to_wav
 from training.model_chorale_dense import ChoraleDenseModel
 from training.pre_chorale_dense import (
     PAD_ID, BOS_ID, EOS_ID, REST_ID, VOCAB_SIZE,
@@ -263,6 +263,7 @@ def main():
 
         decode_tokens_to_midi(tokens, out_path, bpm=args.bpm)
         set_gm_programs(out_path)
+        render_midi_to_wav(out_path)
         print(f"  Saved: {out_path}")
 
         # Also save token JSON
