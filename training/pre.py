@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Event-stream preprocessing with canonical instrument labels and train-only augmentation.
+Event-stream preprocessing with configurable instrument sets and train-only augmentation.
 
-Instruments (canonical 6):
-  voxlead, voxharm (includes auxvox), guitar, other (renamed from synth, fallback),
-  bass, drums
+Instrument presets:
+  blues6:   voxlead, voxharm, guitar, other, bass, drums  (original 6)
+  chorale4: soprano, alto, tenor, bassvox                  (Bach chorales)
 
 Augmentations (TRAIN ONLY):
-  • Pitch: ±1 semitone on melodic instruments (drums untouched)
+  • Pitch: ±{1,3,5} semitones on melodic instruments (drums untouched)
   • Velocity: ±10 additive (clipped to [1,127])
 
 Outputs
@@ -24,14 +24,8 @@ DATA_FOLDER/
 Event order per note: TIME_SHIFT → BAR (optional) → INST → VEL → PITCH → DUR.
 BAR tokens encode (steps_per_bar, bar_position) pairs so mixed meters work.
 
-Aux targets ("polyphony instructor") are computed per 512-token window from note intervals:
-  • max_polyphony per instrument (6)
-  • mean_polyphony per instrument (6)
-  • overlap_ratio per instrument (6)  [union of note sounding time / window duration]
-  • chord stats for guitar & other: mean and max chord size on onset bins (4)
-  • pitch-class histogram (12) for non-drums (L1-normalized)
-
-Total aux_dim = 6 + 6 + 6 + 4 + 12 = 34
+Aux targets ("polyphony instructor") are computed per 512-token window from note intervals.
+Aux_dim depends on instrument config (blues6=36, chorale4=24).
 """
 
 import os
@@ -40,6 +34,8 @@ import json
 import random
 import pickle
 import argparse
+import itertools
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Set, Optional
 
 import numpy as np
@@ -53,19 +49,87 @@ os.makedirs(DATA_FOLDER, exist_ok=True)
 SAMPLES_DIR   = os.path.join(DATA_FOLDER, "_samples")
 os.makedirs(SAMPLES_DIR, exist_ok=True)
 
-# -------------- CORE SETTINGS --------------
-INSTRUMENT_NAMES = ["voxlead", "voxharm", "guitar", "other", "bass", "drums"]
-NUM_INSTRUMENTS = len(INSTRUMENT_NAMES)
-DRUM_IDX  = INSTRUMENT_NAMES.index("drums")
-OTHER_IDX = INSTRUMENT_NAMES.index("other")
-GUITAR_IDX = INSTRUMENT_NAMES.index("guitar")
+# -------------- INSTRUMENT CONFIG --------------
+@dataclass
+class InstrumentConfig:
+    names: List[str]
+    drum_idx: Optional[int] = None
+    guitar_idx: Optional[int] = None
+    other_idx: Optional[int] = None
+    bass_idx: Optional[int] = None
+    voxlead_idx: Optional[int] = None
+    voxharm_idx: Optional[int] = None
+    # Augmentation settings (per-preset)
+    aug_transposes: List[int] = field(default_factory=lambda: [-5, -3, -1, 1, 3, 5])
+    aug_vel_deltas: List[int] = field(default_factory=lambda: [-10, 10])
+    # Optional voice range limits for transposition validation: {voice_name: (min_midi, max_midi)}
+    voice_ranges: Dict[str, Tuple[int, int]] = field(default_factory=dict)
 
+    @property
+    def num_instruments(self) -> int:
+        return len(self.names)
+
+    def has_drums(self) -> bool:
+        return self.drum_idx is not None
+
+
+def make_instrument_config(names: List[str]) -> InstrumentConfig:
+    """Auto-detect role indices from instrument names."""
+    def _find(name: str) -> Optional[int]:
+        try:
+            return names.index(name)
+        except ValueError:
+            return None
+
+    cfg = InstrumentConfig(
+        names=list(names),
+        drum_idx=_find("drums"),
+        guitar_idx=_find("guitar"),
+        other_idx=_find("other"),
+        bass_idx=_find("bass"),
+        voxlead_idx=_find("voxlead"),
+        voxharm_idx=_find("voxharm"),
+    )
+
+    # Chorale-specific settings
+    if set(names) == {"soprano", "alto", "tenor", "bassvox"}:
+        cfg.aug_transposes = []  # keys normalized at MIDI conversion time
+        cfg.aug_vel_deltas = []  # uniform velocity in chorales
+        cfg.voice_ranges = {
+            "soprano": (57, 84),
+            "alto": (50, 77),
+            "tenor": (43, 72),
+            "bassvox": (33, 69),
+        }
+
+    return cfg
+
+
+INSTRUMENT_PRESETS: Dict[str, List[str]] = {
+    "blues6":   ["voxlead", "voxharm", "guitar", "other", "bass", "drums"],
+    "chorale4": ["soprano", "alto", "tenor", "bassvox"],
+}
+
+# Default config (blues6) — used by legacy callers and module-level constants
+_DEFAULT_CONFIG = make_instrument_config(INSTRUMENT_PRESETS["blues6"])
+
+# Legacy globals for backward compatibility (used by tests, generate.py seed import, etc.)
+INSTRUMENT_NAMES = _DEFAULT_CONFIG.names
+NUM_INSTRUMENTS = _DEFAULT_CONFIG.num_instruments
+DRUM_IDX = _DEFAULT_CONFIG.drum_idx  # type: ignore[assignment]
+OTHER_IDX = _DEFAULT_CONFIG.other_idx  # type: ignore[assignment]
+GUITAR_IDX = _DEFAULT_CONFIG.guitar_idx  # type: ignore[assignment]
+BASS_IDX = _DEFAULT_CONFIG.bass_idx  # type: ignore[assignment]
+VOXLEAD_IDX = _DEFAULT_CONFIG.voxlead_idx  # type: ignore[assignment]
+VOXHARM_IDX = _DEFAULT_CONFIG.voxharm_idx  # type: ignore[assignment]
+
+# -------------- CORE SETTINGS --------------
 # Windowing for LM training
 SEQ_LEN    = 512
 SEQ_STRIDE = 256
 
 # ----- DATA AUGMENTATION (TRAIN ONLY) -----
-AUG_TRANSPOSES = [-1, 1]      # semitone shifts for melodic instruments (drums not transposed)
+AUG_TRANSPOSES = [-5, -3, -1, 1, 3, 5]  # semitone shifts for melodic instruments (all common blues keys)
 AUG_VEL_DELTAS = [-10, 10]    # additive velocity shifts for ALL instruments (clip to [1,127])
 AUG_ENABLE     = True
 
@@ -93,16 +157,27 @@ TRACK_ALIASES = {
     "drums": "drums",
 }
 
-def parse_tracks_arg(s: str) -> List[str]:
+def parse_tracks_arg(s: str, config: Optional[InstrumentConfig] = None) -> List[str]:
+    if config is None:
+        config = _DEFAULT_CONFIG
     s = (s or "").strip().lower()
     if (not s) or s in ("all", "*"):
-        return list(INSTRUMENT_NAMES)
+        return list(config.names)
     parts = [p.strip().lower() for p in s.split(",") if p.strip()]
     out = []
     for p in parts:
+        # Try alias first (blues6 only), then direct name match
         canon = TRACK_ALIASES.get(p, None)
         if canon is None:
-            raise ValueError(f"Unknown track '{p}'. Valid: {sorted(TRACK_ALIASES.keys())} or 'all'.")
+            # Check if it's a direct name in config.names
+            if p in config.names:
+                canon = p
+            else:
+                raise ValueError(
+                    f"Unknown track '{p}'. Valid: {sorted(set(config.names) | set(TRACK_ALIASES.keys()))} or 'all'."
+                )
+        if canon not in config.names:
+            raise ValueError(f"Track '{canon}' not in instrument config: {config.names}")
         if canon not in out:
             out.append(canon)
     return out
@@ -175,7 +250,7 @@ def diagnose_drum_midi_anomalies(midi_folder: str, strict_range_only: bool = Tru
 # -------------- GRID / BINS --------------
 BASE_SUBDIV = 4  # steps per quarter note group used for BAR positions
 TIME_SHIFT_QN_STEP = 1.0/24.0
-TIME_SHIFT_QN_MAX  = 8.0   # in quarter notes
+TIME_SHIFT_QN_MAX  = 4.0   # in quarter notes (multi-token encoding handles longer gaps)
 
 def make_duration_bins_qn(max_qn=8.0):
     base = [1/24, 1/12, 1/8, 1/6, 1/4, 1/3, 3/8, 1/2, 2/3, 3/4, 1.0,
@@ -264,8 +339,50 @@ ALIAS_TO_CANON = {
     "synth":  "other",
 }
 
-def map_name_to_slot(inst: pretty_midi.Instrument) -> int:
-    lname = (inst.name or "").lower()
+VOXLEAD_IDX = INSTRUMENT_NAMES.index("voxlead")
+VOXHARM_IDX = INSTRUMENT_NAMES.index("voxharm")
+BASS_IDX    = INSTRUMENT_NAMES.index("bass")
+
+def _slot_from_gm_program(prog: int) -> Optional[int]:
+    """Map GM program number to canonical instrument slot.
+
+    Returns None for programs we don't recognise — caller falls through to OTHER_IDX.
+    """
+    if 0 <= prog <= 7:     return OTHER_IDX       # piano
+    if 16 <= prog <= 20:   return OTHER_IDX       # organ family (Hammond, etc.)
+    if prog == 22:         return OTHER_IDX       # harmonica (very common in blues)
+    if 24 <= prog <= 31:   return GUITAR_IDX      # guitar family
+    if 32 <= prog <= 39:   return BASS_IDX        # bass family
+    if prog == 52:         return VOXLEAD_IDX     # choir aahs → lead vox
+    if 53 <= prog <= 54:   return VOXHARM_IDX     # voice oohs / synth voice
+    # Fallback mappings
+    if 48 <= prog <= 51:   return OTHER_IDX       # strings ensemble
+    if prog == 55:         return OTHER_IDX       # orchestra hit
+    if 56 <= prog <= 63:   return OTHER_IDX       # brass
+    if 64 <= prog <= 71:   return OTHER_IDX       # reed
+    if 80 <= prog <= 87:   return OTHER_IDX       # synth lead
+    return None
+
+
+def map_name_to_slot(inst: pretty_midi.Instrument,
+                     config: Optional[InstrumentConfig] = None) -> int:
+    if config is None:
+        config = _DEFAULT_CONFIG
+
+    lname = (inst.name or "").strip().lower()
+
+    # For non-blues6 configs: try exact match on config.names first
+    if config.names != INSTRUMENT_PRESETS["blues6"]:
+        for idx, cname in enumerate(config.names):
+            if lname == cname:
+                return idx
+        # No exact match — skip heuristics for non-blues configs
+        raise ValueError(
+            f"Track name '{inst.name}' not in config.names={config.names}. "
+            f"Converter should write exact names."
+        )
+
+    # --- blues6 heuristics below ---
     # canonicalize common aliases first
     for alias, canon in ALIAS_TO_CANON.items():
         if alias in lname:
@@ -273,34 +390,49 @@ def map_name_to_slot(inst: pretty_midi.Instrument) -> int:
 
     # Drums
     if inst.is_drum or any(k in lname for k in DRUM_KEYWORDS):
-        return DRUM_IDX
+        assert config.drum_idx is not None
+        return config.drum_idx
 
     # Vox lead
     if "voxlead" in lname or ("lead" in lname and "vox" in lname):
-        return INSTRUMENT_NAMES.index("voxlead")
+        assert config.voxlead_idx is not None
+        return config.voxlead_idx
 
     # Vox harm (includes auxvox/backing)
     if ("voxharm" in lname) or ("harmony" in lname and "vox" in lname):
-        return INSTRUMENT_NAMES.index("voxharm")
+        assert config.voxharm_idx is not None
+        return config.voxharm_idx
 
     # Guitar
     if "guitar" in lname or "gtr" in lname:
-        return INSTRUMENT_NAMES.index("guitar")
+        assert config.guitar_idx is not None
+        return config.guitar_idx
 
     # Bass
     if "bass" in lname:
-        return INSTRUMENT_NAMES.index("bass")
+        assert config.bass_idx is not None
+        return config.bass_idx
+
+    # GM program fallback (for files with empty/generic track names)
+    gm_slot = _slot_from_gm_program(inst.program)
+    if gm_slot is not None:
+        return gm_slot
 
     # Everything else → other
-    return OTHER_IDX
+    assert config.other_idx is not None
+    return config.other_idx
 
-def extract_multitrack_events(path: str):
+def extract_multitrack_events(path: str,
+                              config: Optional[InstrumentConfig] = None):
     """
     Returns:
       events: list of (start_sec, inst_idx, midi_pitch, velocity, dur_qn)
       tempo_bpm
       bar_starts, bars_meta
     """
+    if config is None:
+        config = _DEFAULT_CONFIG
+
     pm = pretty_midi.PrettyMIDI(path)
     tc = pm.get_tempo_changes()
     tempo = float(tc[1][0]) if tc[1].size > 0 else 120.0
@@ -309,7 +441,7 @@ def extract_multitrack_events(path: str):
 
     ev = []
     for inst in pm.instruments:
-        slot = map_name_to_slot(inst)
+        slot = map_name_to_slot(inst, config)
         for n in inst.notes:
             start = float(n.start)
             dur_qn = qn_between(n.start, n.end, tempo)
@@ -319,8 +451,10 @@ def extract_multitrack_events(path: str):
     return ev, tempo, bar_starts, bars_meta
 
 # -------------- AUGMENTATION HELPERS --------------
-def is_drum_slot(inst_idx: int) -> bool:
-    return inst_idx == DRUM_IDX
+def is_drum_slot(inst_idx: int, config: Optional[InstrumentConfig] = None) -> bool:
+    if config is None:
+        config = _DEFAULT_CONFIG
+    return config.drum_idx is not None and inst_idx == config.drum_idx
 
 def clip_midi_pitch(p: int) -> int:
     return max(0, min(127, int(p)))
@@ -331,38 +465,61 @@ def clip_velocity(v: int) -> int:
 def augment_events_additive(
     ev: List[Tuple[float,int,int,int,float]],
     semitone_shift: int,
-    vel_delta: int
-) -> List[Tuple[float,int,int,int,float]]:
+    vel_delta: int,
+    config: Optional[InstrumentConfig] = None,
+) -> Optional[List[Tuple[float,int,int,int,float]]]:
     """
     Return a new list:
       • melodic pitches shifted by semitone_shift (drums untouched)
       • velocities shifted by vel_delta (all instruments), clipped to [1,127]
+
+    If config has voice_ranges, rejects the entire transposition if any note
+    falls outside the voice's range.  Returns None if rejected.
     """
+    if config is None:
+        config = _DEFAULT_CONFIG
+
     out = []
     for (start_s, inst, midi, vel, dur_qn) in ev:
-        midi_out = midi if is_drum_slot(inst) else clip_midi_pitch(midi + semitone_shift)
-        v = clip_velocity(vel + vel_delta)
+        if is_drum_slot(inst, config):
+            midi_out = midi
+        else:
+            midi_out = clip_midi_pitch(midi + semitone_shift)
+            # Voice range check
+            if config.voice_ranges:
+                voice_name = config.names[inst] if inst < len(config.names) else None
+                if voice_name and voice_name in config.voice_ranges:
+                    lo, hi = config.voice_ranges[voice_name]
+                    if midi_out < lo or midi_out > hi:
+                        return None  # reject this transposition
+        v = clip_velocity(vel + vel_delta) if vel_delta != 0 else vel
         out.append((start_s, inst, midi_out, v, dur_qn))
     return out
 
 # -------------- VOCAB BUILD --------------
-def build_pitch_maps(all_events):
+def build_pitch_maps(all_events, config: Optional[InstrumentConfig] = None):
     """
     Build per-family pitch maps:
       general (melodic instruments), drums (all percussive pitches).
+    When config has no drums, the drums map is empty.
     """
+    if config is None:
+        config = _DEFAULT_CONFIG
+
     gen: Set[int] = set()
     drums: Set[int] = set()
     for _, inst, midi, _, _ in all_events:
-        if inst == DRUM_IDX:
+        if is_drum_slot(inst, config):
             drums.add(midi)
         else:
             gen.add(midi)
 
-    maps = {
+    maps: Dict[str, Dict[int, int]] = {
         "general": {p: i+1 for i, p in enumerate(sorted(gen))},   # 0 reserved
-        "drums":   {p: i+1 for i, p in enumerate(sorted(drums))}, # 0 reserved
     }
+    if config.has_drums():
+        maps["drums"] = {p: i+1 for i, p in enumerate(sorted(drums))}  # 0 reserved
+
     return maps
 
 def gather_bar_pairs(all_bars_meta: List[List[Tuple[float,float,int]]]) -> List[Tuple[int,int]]:
@@ -382,7 +539,55 @@ def quantize_duration_qn(d_qn: float) -> int:
     return int(DURATION_BINS_QN.index(val))
 
 # -------------- EVENT VOCAB LAYOUT --------------
-def build_event_vocab(pitch_maps, bar_pairs: List[Tuple[int,int]]):
+def compute_aux_layout(config: InstrumentConfig) -> Dict:
+    """Compute the auxiliary feature layout for a given instrument config.
+
+    Returns dict with 'aux_dim', 'fields', 'enabled'.
+    """
+    N = config.num_instruments
+    fields: List[str] = []
+    dim = 0
+
+    # Always present: per-instrument polyphony features
+    fields.append(f"max_polyphony[{N}]")
+    dim += N
+    fields.append(f"mean_polyphony[{N}]")
+    dim += N
+    fields.append(f"overlap_ratio[{N}]")
+    dim += N
+
+    # Chord stats only for configs with guitar + other
+    has_chords = config.guitar_idx is not None and config.other_idx is not None
+    if has_chords:
+        fields.append("chord_mean_guitar, chord_max_guitar, chord_mean_other, chord_max_other")
+        dim += 4
+
+    # Pitch class histogram (always)
+    fields.append("pitch_class_histogram[12] (non-drums, normalized)")
+    dim += 12
+
+    # Swing/blues only for configs with drums
+    has_swing_blues = config.has_drums()
+    if has_swing_blues:
+        fields.append("swing_score[1] (0=straight, 1=triplet-shuffle)")
+        dim += 1
+        fields.append("blues_scale_score[1] (0=none, 1=all in blues scale)")
+        dim += 1
+
+    return {
+        "aux_dim": dim,
+        "fields": fields,
+        "enabled": True,
+        "has_chords": has_chords,
+        "has_swing_blues": has_swing_blues,
+    }
+
+
+def build_event_vocab(pitch_maps, bar_pairs: List[Tuple[int,int]],
+                      config: Optional[InstrumentConfig] = None):
+    if config is None:
+        config = _DEFAULT_CONFIG
+
     vocab = {}
     idx = 0
     vocab["PAD"] = {"start": idx, "size": 1}; idx += 1
@@ -396,21 +601,28 @@ def build_event_vocab(pitch_maps, bar_pairs: List[Tuple[int,int]]):
     n_time = max(1, n_time)
     vocab["TIME_SHIFT"] = {"start": idx, "size": n_time}; idx += n_time
 
-    vocab["INST"] = {"start": idx, "size": NUM_INSTRUMENTS}; idx += NUM_INSTRUMENTS
+    vocab["INST"] = {"start": idx, "size": config.num_instruments}; idx += config.num_instruments
     vocab["VEL"]  = {"start": idx, "size": len(VELOCITY_BINS)}; idx += len(VELOCITY_BINS)
     vocab["DUR"]  = {"start": idx, "size": len(DURATION_BINS_QN)}; idx += len(DURATION_BINS_QN)
 
-    gen_sz   = len(pitch_maps["general"]) + 1
-    drums_sz = len(pitch_maps["drums"]) + 1
-    vocab["PITCH_GENERAL"] = {"start": idx, "size": gen_sz};   idx += gen_sz
-    vocab["PITCH_DRUMS"]   = {"start": idx, "size": drums_sz}; idx += drums_sz
+    gen_sz = len(pitch_maps["general"]) + 1
+    vocab["PITCH_GENERAL"] = {"start": idx, "size": gen_sz}; idx += gen_sz
+
+    if config.has_drums() and "drums" in pitch_maps:
+        drums_sz = len(pitch_maps["drums"]) + 1
+        vocab["PITCH_DRUMS"] = {"start": idx, "size": drums_sz}; idx += drums_sz
 
     pitch_space_for_inst = {}
-    for i in range(NUM_INSTRUMENTS):
-        pitch_space_for_inst[str(i)] = "PITCH_DRUMS" if i == DRUM_IDX else "PITCH_GENERAL"
+    for i in range(config.num_instruments):
+        if is_drum_slot(i, config):
+            pitch_space_for_inst[str(i)] = "PITCH_DRUMS"
+        else:
+            pitch_space_for_inst[str(i)] = "PITCH_GENERAL"
+
+    aux_layout = compute_aux_layout(config)
 
     vocab_meta = {
-        "type": "event_vocab_v1_canonical6_aug_aux34",
+        "type": f"event_vocab_v2_{config.num_instruments}inst",
         "base_subdiv": BASE_SUBDIV,
         "time_shift_qn_step": TIME_SHIFT_QN_STEP,
         "time_shift_qn_max": TIME_SHIFT_QN_MAX,
@@ -421,19 +633,9 @@ def build_event_vocab(pitch_maps, bar_pairs: List[Tuple[int,int]]):
         "bar_pairs": bar_pairs,
         "bar_pair_to_local": {f"{s}:{p}": i for (s,p), i in bar_pair_to_local.items()},
         "layout": vocab,
-        "instrument_names": INSTRUMENT_NAMES,
-        "drum_index": DRUM_IDX,
-        "aux": {
-            "enabled": True,
-            "aux_dim": 34,
-            "fields": [
-                "max_polyphony[6]",
-                "mean_polyphony[6]",
-                "overlap_ratio[6]",
-                "chord_mean_guitar, chord_max_guitar, chord_mean_other, chord_max_other",
-                "pitch_class_histogram[12] (non-drums, normalized)"
-            ]
-        }
+        "instrument_names": config.names,
+        "drum_index": config.drum_idx,
+        "aux": aux_layout,
     }
     return vocab_meta
 
@@ -473,7 +675,8 @@ def encode_dur(vocab, d_qn: float) -> int:
 def encode_pitch(vocab, inst_idx: int, midi_pitch: int) -> Optional[int]:
     space_name = vocab["pitch_space_for_inst"][str(inst_idx)]
     pmaps = vocab["pitch_maps"]["general"] if space_name == "PITCH_GENERAL" else vocab["pitch_maps"]["drums"]
-    local = pmaps.get(int(midi_pitch), None)
+    # JSON round-trips keys as strings, so try both int and str lookups
+    local = pmaps.get(int(midi_pitch)) or pmaps.get(str(midi_pitch))
     if local is None:
         return None
     return tok_of(vocab, space_name, local)
@@ -646,20 +849,34 @@ def events_to_intervals_qn(ev, tempo_bpm: float):
 def compute_aux_for_window(intervals,
                            t0_qn: float,
                            t1_qn: float,
-                           num_instruments: int,
-                           drum_idx: int,
-                           guitar_idx: int,
-                           other_idx: int,
+                           config: Optional[InstrumentConfig] = None,
+                           # Legacy keyword args for backward compat
+                           num_instruments: Optional[int] = None,
+                           drum_idx: Optional[int] = None,
+                           guitar_idx: Optional[int] = None,
+                           other_idx: Optional[int] = None,
                            onset_bin_qn: float = 1.0/24.0) -> np.ndarray:
     """
-    Returns aux vector float32 shape (34,).
+    Returns aux vector float32.  Shape depends on config:
+      blues6  → (36,)
+      chorale4 → (24,)
     """
+    if config is None:
+        config = _DEFAULT_CONFIG
+    # Legacy callers may pass num_instruments etc. — use config instead
+    n_inst = config.num_instruments
+    _drum_idx = config.drum_idx
+    _guitar_idx = config.guitar_idx
+    _other_idx = config.other_idx
+    aux_info = compute_aux_layout(config)
+
     if t1_qn <= t0_qn:
         t1_qn = t0_qn + 1e-3
     win_dur = t1_qn - t0_qn
 
-    segs = [[] for _ in range(num_instruments)]
-    pitches_in_win = []
+    segs: List[List[Tuple[float, float]]] = [[] for _ in range(n_inst)]
+    pitches_in_win: List[int] = []
+    onsets_qn: List[float] = []
 
     for (s, e, inst, pitch) in intervals:
         if e <= t0_qn:
@@ -669,9 +886,12 @@ def compute_aux_for_window(intervals,
         ss = max(s, t0_qn)
         ee = min(e, t1_qn)
         if ee > ss:
-            segs[inst].append((ss, ee))
-            if inst != drum_idx:
+            if inst < n_inst:
+                segs[inst].append((ss, ee))
+            if not is_drum_slot(inst, config):
                 pitches_in_win.append(pitch)
+                if s >= t0_qn:
+                    onsets_qn.append(s)
 
     def union_len(segments: List[Tuple[float,float]]) -> float:
         if not segments:
@@ -710,49 +930,59 @@ def compute_aux_for_window(intervals,
         mean = area / win_dur
         return float(mx), float(mean)
 
-    max_poly = np.zeros(num_instruments, dtype=np.float32)
-    mean_poly = np.zeros(num_instruments, dtype=np.float32)
-    overlap = np.zeros(num_instruments, dtype=np.float32)
+    max_poly = np.zeros(n_inst, dtype=np.float32)
+    mean_poly = np.zeros(n_inst, dtype=np.float32)
+    overlap = np.zeros(n_inst, dtype=np.float32)
 
-    for i in range(num_instruments):
+    for i in range(n_inst):
         segments = segs[i]
         overlap[i] = float(union_len(segments) / win_dur) if win_dur > 0 else 0.0
         mx, mn = poly_stats(segments)
         max_poly[i] = mx
         mean_poly[i] = mn
 
-    def chord_stats_for_inst(inst_idx: int) -> Tuple[float, float]:
-        # bin onsets to avoid float mismatch
-        ons = []
-        for (s, e, inst, pitch) in intervals:
-            if inst != inst_idx:
-                continue
-            if s < t0_qn or s >= t1_qn:
-                continue
-            b = int(round((s - t0_qn) / onset_bin_qn))
-            ons.append(b)
-        if not ons:
-            return 0.0, 0.0
-        c = Counter(ons)
-        sizes = np.array(list(c.values()), dtype=np.float32)
-        return float(sizes.mean()), float(sizes.max())
+    parts: List[np.ndarray] = [max_poly, mean_poly, overlap]
 
-    mean_ch_g, max_ch_g = chord_stats_for_inst(guitar_idx)
-    mean_ch_o, max_ch_o = chord_stats_for_inst(other_idx)
+    # Chord stats (only for configs with guitar + other)
+    if aux_info["has_chords"]:
+        assert _guitar_idx is not None and _other_idx is not None
 
+        def chord_stats_for_inst(inst_idx: int) -> Tuple[float, float]:
+            ons = []
+            for (s, e, inst, pitch) in intervals:
+                if inst != inst_idx:
+                    continue
+                if s < t0_qn or s >= t1_qn:
+                    continue
+                b = int(round((s - t0_qn) / onset_bin_qn))
+                ons.append(b)
+            if not ons:
+                return 0.0, 0.0
+            c = Counter(ons)
+            sizes = np.array(list(c.values()), dtype=np.float32)
+            return float(sizes.mean()), float(sizes.max())
+
+        mean_ch_g, max_ch_g = chord_stats_for_inst(_guitar_idx)
+        mean_ch_o, max_ch_o = chord_stats_for_inst(_other_idx)
+        parts.append(np.array([mean_ch_g, max_ch_g, mean_ch_o, max_ch_o], dtype=np.float32))
+
+    # Pitch class histogram (always)
     pc = np.zeros(12, dtype=np.float32)
     for p in pitches_in_win:
         pc[int(p) % 12] += 1.0
-    s = float(pc.sum())
-    if s > 0:
-        pc /= s
+    s_pc = float(pc.sum())
+    pc_norm = (pc / s_pc) if s_pc > 0 else pc
+    parts.append(pc_norm)
 
-    aux = np.concatenate([
-        max_poly, mean_poly, overlap,
-        np.array([mean_ch_g, max_ch_g, mean_ch_o, max_ch_o], dtype=np.float32),
-        pc
-    ], axis=0).astype(np.float32)
+    # Swing & blues (only for configs with drums)
+    if aux_info["has_swing_blues"]:
+        swing_score = calculate_swing_score(onsets_qn)
+        blues_score = calculate_blues_scale_score(pitches_in_win)
+        parts.append(np.array([swing_score, blues_score], dtype=np.float32))
 
+    aux = np.concatenate(parts, axis=0).astype(np.float32)
+    assert aux.shape[0] == aux_info["aux_dim"], \
+        f"aux shape mismatch: got {aux.shape[0]}, expected {aux_info['aux_dim']}"
     return aux
 
 # -------------- WINDOWING (legacy, not used now) --------------
@@ -772,6 +1002,174 @@ def window_sequences(tokens: List[int], max_len=SEQ_LEN, stride=SEQ_STRIDE) -> L
         start += stride
     return out
 
+# -------------- VOCAB COMPACTION --------------
+def compact_vocab(
+    train_seqs: List[List[int]],
+    val_seqs: List[List[int]],
+    vocab: dict,
+) -> dict:
+    """Remove unused token values from vocab and remap all sequences in-place.
+
+    After the first tokenization pass, many (group, local_idx) slots are allocated
+    but never appear in any sequence.  This function:
+      1. Scans every sequence to find which global tokens are actually used.
+      2. Builds a per-group old_local → new_local remapping (contiguous from 0).
+      3. Rebuilds vocab metadata (layout, bar_pairs, bins, pitch_maps).
+      4. Remaps every token in every sequence in-place.
+    """
+    old_layout = vocab["layout"]
+
+    # -- Step 1: collect used global token IDs --
+    used_globals: Set[int] = set()
+    for seq in itertools.chain(train_seqs, val_seqs):
+        used_globals.update(seq)
+
+    # -- Step 2: per-group used locals & remapping --
+    # Core groups in canonical order, then any extra groups (e.g. SEP, CHORD_*)
+    _CORE_ORDER = ["PAD", "BOS", "EOS", "BAR", "TIME_SHIFT", "INST",
+                   "VEL", "DUR", "PITCH_GENERAL", "PITCH_DRUMS"]
+    GROUP_ORDER = [g for g in _CORE_ORDER if g in old_layout]
+    extra_groups = [g for g in old_layout if g not in _CORE_ORDER]
+    extra_groups.sort(key=lambda g: old_layout[g]["start"])
+    GROUP_ORDER.extend(extra_groups)
+    KEEP_GROUPS = {"PAD", "BOS", "EOS", "INST"} | set(extra_groups)
+    COMPACT_GROUPS = [g for g in GROUP_ORDER if g not in KEEP_GROUPS]
+
+    old_to_new_local: Dict[str, Dict[int, int]] = {}
+    new_sizes: Dict[str, int] = {}
+
+    for group in COMPACT_GROUPS:
+        start, size = old_layout[group]["start"], old_layout[group]["size"]
+        used_locals = sorted(
+            local for local in range(size)
+            if (start + local) in used_globals
+        )
+        old_to_new_local[group] = {old: new for new, old in enumerate(used_locals)}
+        new_sizes[group] = len(used_locals)
+
+    for group in KEEP_GROUPS:
+        new_sizes[group] = old_layout[group]["size"]
+        old_to_new_local[group] = {i: i for i in range(old_layout[group]["size"])}
+
+    # -- Step 3: rebuild layout with sequential offsets --
+    new_layout: Dict[str, dict] = {}
+    idx = 0
+    for group in GROUP_ORDER:
+        new_layout[group] = {"start": idx, "size": new_sizes[group]}
+        idx += new_sizes[group]
+
+    # -- Step 4: build global remap (old global → new global) --
+    global_remap: Dict[int, int] = {}
+    for group in GROUP_ORDER:
+        old_start = old_layout[group]["start"]
+        new_start = new_layout[group]["start"]
+        for old_local, new_local in old_to_new_local[group].items():
+            global_remap[old_start + old_local] = new_start + new_local
+
+    # -- Step 5: remap all sequences in-place --
+    for seq in itertools.chain(train_seqs, val_seqs):
+        for i, tok in enumerate(seq):
+            seq[i] = global_remap[tok]
+
+    # -- Step 6: rebuild vocab metadata --
+
+    # BAR: keep only pairs whose local index was used
+    old_bar_pairs = vocab["bar_pairs"]
+    bar_remap = old_to_new_local["BAR"]
+    new_bar_pairs: List[Tuple[int, int]] = []
+    new_bar_pair_to_local: Dict[str, int] = {}
+    for old_local in sorted(bar_remap.keys()):
+        pair = old_bar_pairs[old_local]
+        new_bar_pairs.append(pair)
+        s, p = pair
+        new_bar_pair_to_local[f"{s}:{p}"] = bar_remap[old_local]
+
+    # VEL: keep only bins at used indices
+    vel_remap = old_to_new_local["VEL"]
+    new_velocity_bins = [vocab["velocity_bins"][old] for old in sorted(vel_remap.keys())]
+
+    # DUR: keep only bins at used indices
+    dur_remap = old_to_new_local["DUR"]
+    new_duration_bins_qn = [vocab["duration_bins_qn"][old] for old in sorted(dur_remap.keys())]
+
+    # PITCH: remap local indices in pitch maps
+    gen_remap = old_to_new_local["PITCH_GENERAL"]
+    new_pitch_maps: Dict[str, Dict] = {
+        "general": {midi_pitch: gen_remap[local]
+                     for midi_pitch, local in vocab["pitch_maps"]["general"].items()
+                     if local in gen_remap},
+    }
+    if "PITCH_DRUMS" in old_to_new_local and "drums" in vocab["pitch_maps"]:
+        drums_remap = old_to_new_local["PITCH_DRUMS"]
+        new_pitch_maps["drums"] = {
+            midi_pitch: drums_remap[local]
+            for midi_pitch, local in vocab["pitch_maps"]["drums"].items()
+            if local in drums_remap
+        }
+
+    # -- Step 7: report savings --
+    print("\n── Vocab Compaction ─────────────────────────")
+    total_removed = 0
+    for group in GROUP_ORDER:
+        old_sz = old_layout[group]["size"]
+        new_sz = new_sizes[group]
+        removed = old_sz - new_sz
+        total_removed += removed
+        if removed > 0:
+            print(f"  {group:>15}: {old_sz:4d} → {new_sz:4d}  (removed {removed})")
+    old_total = max(v["start"] + v["size"] for v in old_layout.values())
+    new_total = max(v["start"] + v["size"] for v in new_layout.values())
+    print(f"  {'TOTAL':>15}: {old_total:4d} → {new_total:4d}  (removed {total_removed})")
+    print("─────────────────────────────────────────────")
+
+    # -- Update vocab dict --
+    vocab["layout"] = new_layout
+    vocab["bar_pairs"] = new_bar_pairs
+    vocab["bar_pair_to_local"] = new_bar_pair_to_local
+    vocab["velocity_bins"] = new_velocity_bins
+    vocab["duration_bins_qn"] = new_duration_bins_qn
+    vocab["pitch_maps"] = new_pitch_maps
+
+    return vocab
+
+
+def calculate_swing_score(onsets_qn: List[float]) -> float:
+    """Measure fraction of off-beat onsets that are closer to triplet (2/3) than straight (1/2)."""
+    off_beats = [o % 1.0 for o in onsets_qn if 0.25 <= (o % 1.0) <= 0.75]
+    if not off_beats:
+        return 0.0
+    # 0.5 is straight 8th, 0.666 is triplet 8th
+    triplet_hits = sum(1 for p in off_beats if abs(p - 0.666) < abs(p - 0.5))
+    return float(triplet_hits) / len(off_beats)
+
+def calculate_blues_scale_score(pitches: List[int]) -> float:
+    """Find most likely root from pitch-class histogram, then check adherence to blues scale."""
+    if not pitches:
+        return 0.0
+    pc = Counter(p % 12 for p in pitches)
+    # Most common pitch class as a candidate for the root (I)
+    root = pc.most_common(1)[0][0]
+    blues_intervals = {0, 3, 5, 6, 7, 10} # root, b3, 4, b5, 5, b7
+    blues_pcs = {(root + i) % 12 for i in blues_intervals}
+    on_scale = sum(pc[p] for p in blues_pcs)
+    return float(on_scale) / len(pitches)
+
+def is_track_bluesy(ev, tempo_bpm: float, min_scale_score: float = 0.60, min_swing_score: float = 0.50,
+                    config: Optional[InstrumentConfig] = None) -> bool:
+    """Quick check for bluesiness (swing or scale) to filter training data."""
+    if config is None:
+        config = _DEFAULT_CONFIG
+    if not ev:
+        return False
+
+    pitches = [e[2] for e in ev if not is_drum_slot(e[1], config)]
+    scale_score = calculate_blues_scale_score(pitches)
+
+    onsets_qn = [qn_between(0.0, e[0], tempo_bpm) for e in ev]
+    swing_score = calculate_swing_score(onsets_qn)
+
+    return (scale_score >= min_scale_score) or (swing_score >= min_swing_score)
+
 # -------------- MAIN PIPELINE --------------
 def main():
     global MIDI_FOLDER, DATA_FOLDER, SAMPLES_DIR, AUG_ENABLE
@@ -781,23 +1179,35 @@ def main():
     ap.add_argument("--tracks", default="all", help="Comma-separated subset of tracks to keep (default: all). Examples: drums,bass,guitar  |  drums,bass  |  all. Aliases: voxbg/bgvox/backingvox/auxvox -> voxharm.")
     ap.add_argument("--no-aug", action="store_true", help="Disable train-time augmentation (transpose/velocity).")
     ap.add_argument("--diagnose-drums", action="store_true", help="Run a quick scan for out-of-range drum pitches and exit.")
+    ap.add_argument("--blues_only", action="store_true", help="Filter out songs that don't meet minimum blues criteria (blues scale adherence or swing).")
+    ap.add_argument("--instrument_set", default="blues6", choices=list(INSTRUMENT_PRESETS.keys()),
+                    help="Preset instrument configuration (default: blues6).")
+    ap.add_argument("--instruments", default="", help="Arbitrary comma-separated instrument names (overrides --instrument_set). E.g.: soprano,alto,tenor,bassvox")
     args = ap.parse_args()
 
     if args.diagnose_drums:
         diagnose_drum_midi_anomalies(args.midi_folder, strict_range_only=True)
         return
 
+    # Resolve instrument config
+    if args.instruments:
+        inst_names = [n.strip() for n in args.instruments.split(",") if n.strip()]
+        config = make_instrument_config(inst_names)
+    else:
+        config = make_instrument_config(INSTRUMENT_PRESETS[args.instrument_set])
+    print(f"Instrument config: {config.names} (drums={config.drum_idx})")
+
     # Apply CLI overrides
     MIDI_FOLDER = args.midi_folder
     DATA_FOLDER = args.data_folder
-    AUG_ENABLE = False if args.no_aug else AUG_ENABLE
+    AUG_ENABLE = False if args.no_aug else True
 
     os.makedirs(DATA_FOLDER, exist_ok=True)
     SAMPLES_DIR = os.path.join(DATA_FOLDER, "_samples")
     os.makedirs(SAMPLES_DIR, exist_ok=True)
 
-    selected_tracks = parse_tracks_arg(args.tracks)
-    allowed_inst_idx = {INSTRUMENT_NAMES.index(t) for t in selected_tracks}
+    selected_tracks = parse_tracks_arg(args.tracks, config)
+    allowed_inst_idx = {config.names.index(t) for t in selected_tracks}
     print(f"Keeping tracks: {selected_tracks} (indices={sorted(allowed_inst_idx)})")
 
     # 1) Collect & split
@@ -805,30 +1215,47 @@ def main():
             sorted(glob.glob(os.path.join(MIDI_FOLDER, "*.midi")))
     if not paths:
         raise RuntimeError(f"No MIDI files found in '{MIDI_FOLDER}'.")
+    if len(paths) < 2:
+        raise RuntimeError(f"Need at least 2 MIDI files for train/val split, got {len(paths)} in '{MIDI_FOLDER}'.")
 
     random.seed(42)
     random.shuffle(paths)
+
     n_train = int(0.8 * len(paths))
     train_paths, val_paths = paths[:n_train], paths[n_train:]
 
     # 2) Gather base events + bar metadata
     song_meta: Dict[str, Tuple[list, float, np.ndarray, list]] = {}
     all_bars_meta = []
+    skipped_not_bluesy = 0
     for p in paths:
         try:
-            ev, tempo, bar_starts, bars_meta = extract_multitrack_events(p)
+            ev, tempo, bar_starts, bars_meta = extract_multitrack_events(p, config)
             # Filter to selected tracks (keep canonical index space)
             ev = [e for e in ev if e[1] in allowed_inst_idx]
             if not ev:
                 raise RuntimeError('No events remain after track filtering.')
+
+            # Optional: Blues Filter
+            if args.blues_only and not is_track_bluesy(ev, tempo, config=config):
+                skipped_not_bluesy += 1
+                continue
+
         except Exception as e:
             print(f"Skipping {os.path.basename(p)}: {e}")
             continue
         song_meta[p] = (ev, tempo, bar_starts, bars_meta)
         all_bars_meta.append(bars_meta)
 
+    if skipped_not_bluesy > 0:
+        print(f"Filtered out {skipped_not_bluesy} songs for not meeting blues criteria (--blues_only).")
+
     if not any(song_meta[p][0] for p in song_meta):
         raise RuntimeError("No events extracted. Check your MIDI folder & mapping heuristics.")
+
+    # Determine augmentation ranges from config
+    aug_transposes = config.aug_transposes
+    aug_vel_deltas = config.aug_vel_deltas if config.aug_vel_deltas else [0]
 
     # 3) Build vocab from: VAL (base) + TRAIN (base + augmented)
     events_for_vocab = []
@@ -845,26 +1272,29 @@ def main():
         ev, _, _, _ = song_meta[p]
         events_for_vocab.extend(ev)
         if AUG_ENABLE:
-            for s in AUG_TRANSPOSES:
-                for dv in AUG_VEL_DELTAS:
-                    ev_aug = augment_events_additive(ev, semitone_shift=s, vel_delta=dv)
-                    events_for_vocab.extend(ev_aug)
+            for s in aug_transposes:
+                for dv in aug_vel_deltas:
+                    ev_aug = augment_events_additive(ev, semitone_shift=s, vel_delta=dv, config=config)
+                    if ev_aug is not None:
+                        events_for_vocab.extend(ev_aug)
 
     # 4) Build vocab
     bar_pairs  = gather_bar_pairs(all_bars_meta)
-    pitch_maps = build_pitch_maps(events_for_vocab)
-    vocab      = build_event_vocab(pitch_maps, bar_pairs)
+    pitch_maps = build_pitch_maps(events_for_vocab, config)
+    vocab      = build_event_vocab(pitch_maps, bar_pairs, config)
     vocab["tracks"] = {
         "selected": selected_tracks,
         "allowed_inst_indices": sorted(list(allowed_inst_idx)),
-        "canonical_instrument_names": INSTRUMENT_NAMES,
+        "canonical_instrument_names": config.names,
     }
 
     # 5) Tokenize & window (train = base + aug; val = base only), and compute aux per window.
-    def tokenize_group_with_aux(group_paths: List[str], do_aug: bool):
+    def tokenize_group_with_aux(group_paths: List[str], do_aug: bool, split_name: str = "train"):
         seqs: List[List[int]] = []
         auxs: List[np.ndarray] = []
-        for p in group_paths:
+        for i, p in enumerate(group_paths):
+            if i % 10 == 0:
+                print(f"Tokenizing ({split_name}): {i}/{len(group_paths)} {os.path.basename(p)}")
             if p not in song_meta:
                 continue
             ev, tempo, bar_starts, bars_meta = song_meta[p]
@@ -875,11 +1305,7 @@ def main():
                 for window, t0, t1 in window_slices_with_time(toks, vocab, SEQ_LEN, SEQ_STRIDE):
                     seqs.append(window)
                     auxs.append(compute_aux_for_window(
-                        intervals, t0, t1,
-                        num_instruments=NUM_INSTRUMENTS,
-                        drum_idx=DRUM_IDX,
-                        guitar_idx=GUITAR_IDX,
-                        other_idx=OTHER_IDX
+                        intervals, t0, t1, config=config,
                     ))
 
             # base
@@ -887,15 +1313,19 @@ def main():
 
             # augmented (train only)
             if do_aug and AUG_ENABLE:
-                for s in AUG_TRANSPOSES:
-                    for dv in AUG_VEL_DELTAS:
-                        ev_aug = augment_events_additive(ev, semitone_shift=s, vel_delta=dv)
-                        add_one(ev_aug)
+                for s in aug_transposes:
+                    for dv in aug_vel_deltas:
+                        ev_aug = augment_events_additive(ev, semitone_shift=s, vel_delta=dv, config=config)
+                        if ev_aug is not None:
+                            add_one(ev_aug)
 
         return seqs, auxs
 
-    train_seqs, train_aux = tokenize_group_with_aux(train_paths, do_aug=True)
-    val_seqs,   val_aux   = tokenize_group_with_aux(val_paths, do_aug=False)
+    train_seqs, train_aux = tokenize_group_with_aux(train_paths, do_aug=True, split_name="train")
+    val_seqs,   val_aux   = tokenize_group_with_aux(val_paths, do_aug=False, split_name="val")
+
+    # 5b) Compact vocab — remove dead tokens, remap sequences in-place
+    vocab = compact_vocab(train_seqs, val_seqs, vocab)
 
     # 6) Save
     with open(os.path.join(DATA_FOLDER, "events_train.pkl"), "wb") as f:
@@ -914,7 +1344,7 @@ def main():
     layout = vocab["layout"]
     total_vocab = max(v["start"] + v["size"] for v in layout.values())
     meters = sorted({s for (s, _) in vocab["bar_pairs"]})
-    sizes = {
+    sizes: Dict[str, object] = {
         "TOTAL_VOCAB": total_vocab,
         "BAR_pairs": layout["BAR"]["size"],
         "TIME_SHIFT": layout["TIME_SHIFT"]["size"],
@@ -922,16 +1352,19 @@ def main():
         "VEL": layout["VEL"]["size"],
         "DUR": layout["DUR"]["size"],
         "PITCH_GENERAL": layout["PITCH_GENERAL"]["size"],
-        "PITCH_DRUMS": layout["PITCH_DRUMS"]["size"],
+    }
+    if "PITCH_DRUMS" in layout:
+        sizes["PITCH_DRUMS"] = layout["PITCH_DRUMS"]["size"]
+    sizes.update({
         "meters_steps_per_bar": meters,
         "time_shift_qn_step": vocab["time_shift_qn_step"],
-        "instruments": INSTRUMENT_NAMES,
+        "instruments": config.names,
         "selected_tracks": selected_tracks,
-        "drum_index": DRUM_IDX,
+        "drum_index": config.drum_idx,
         "aux_dim": vocab["aux"]["aux_dim"] if "aux" in vocab else 0,
         "train_windows": len(train_seqs),
         "val_windows": len(val_seqs),
-    }
+    })
 
     print("\n── Vocab Summary ───────────────────────────")
     for k, v in sizes.items():
@@ -943,16 +1376,15 @@ def main():
     print(f"Round-trip MIDIs in {SAMPLES_DIR}")
 
     # quick aux sanity
+    n_inst = config.num_instruments
     if train_aux:
         a0 = train_aux[0]
         print("\n── Aux Sanity ──────────────────────────────")
         print(f"aux[0] shape: {np.asarray(a0).shape}  dtype={np.asarray(a0).dtype}")
-        max_poly = np.asarray(a0[:NUM_INSTRUMENTS])
-        overlap = np.asarray(a0[2*NUM_INSTRUMENTS:3*NUM_INSTRUMENTS])
-        pc = np.asarray(a0[-12:])
+        max_poly = np.asarray(a0[:n_inst])
+        overlap = np.asarray(a0[2*n_inst:3*n_inst])
         print(f"max_polyphony[0]: {max_poly}")
         print(f"overlap_ratio[0]: {overlap}")
-        print(f"pitchclass sum (should be 0 or 1): {pc.sum():.3f}")
         print("────────────────────────────────────────────")
 
     with open(os.path.join(DATA_FOLDER, "vocab_summary.txt"), "w") as f:

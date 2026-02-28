@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, json, math, pickle, random, time, argparse
+import os, sys, glob as globmod, json, math, pickle, random, time, argparse, atexit, signal
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 from functools import partial
@@ -98,7 +98,7 @@ VOCAB_JSON      = os.path.join(DATA_DIR, "event_vocab.json")
 SAVE_PATH       = "esFullSummer_aux.pt"
 
 # Model size (~1–1.5M params)
-D_MODEL=192; N_HEADS=6; N_LAYERS=4; FF_MULT=3; DROPOUT=0.22
+D_MODEL=192; N_HEADS=6; N_LAYERS=4; FF_MULT=3; DROPOUT=0.12
 
 # Training
 BATCH_SIZE      = 64
@@ -110,8 +110,8 @@ WEIGHT_DECAY    = 1e-2
 MAX_GRAD_NORM   = 1.0
 
 # Label smoothing
-LABEL_SMOOTH_TYPE   = 0.10   # for type classification
-LABEL_SMOOTH_VALUE  = 0.08   # default for value heads
+LABEL_SMOOTH_TYPE   = 0.05   # for type classification
+LABEL_SMOOTH_VALUE  = 0.04   # default for value heads
 LABEL_SMOOTH_PER_TYPE = {
     "PITCH_GENERAL": 0.02,
     "PITCH_DRUMS":   0.02,
@@ -124,18 +124,20 @@ ALPHA_VALUE     = 0.8
 
 # Aux (polyphony instructor) head
 AUX_ENABLED     = True
-AUX_DIM_DEFAULT = 34
-AUX_LOSS_WEIGHT = 0.20          # weight relative to token loss
+AUX_DIM_DEFAULT = 36
+AUX_LOSS_WEIGHT = 0.05          # weight relative to token loss
 AUX_HUBER_DELTA = 1.0           # robust to occasional big outliers
 
 # Aux weighting inside aux vector (optional but recommended)
-# aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12)]
+# aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12), swing(1), blues(1)] = 36
 AUX_WEIGHTS = {
     "max_poly":   1.0,
     "mean_poly":  1.0,
     "overlap":    2.0,   # overlap ratio is in [0,1], often smaller gradients
     "chords":     1.0,
     "pc_hist":    1.0,
+    "swing":      2.0,   # emphasize shuffle
+    "blues":      2.0,   # emphasize blues scale adherence
 }
 
 SEED = 42
@@ -250,19 +252,56 @@ class PositionalEmbedding(nn.Module):
     def forward(self, x):  # (B,T,D)
         return x + self.pe[:x.size(1)].unsqueeze(0)
 
-def _aux_weight_vector(aux_dim: int) -> torch.Tensor:
-    """
-    aux layout: [max_poly(6), mean_poly(6), overlap(6), chord(4), pc_hist(12)] = 34
-    """
-    if aux_dim != 34:
-        return torch.ones(aux_dim, dtype=torch.float32)
+def _aux_weight_vector(aux_dim: int, vocab: Optional[Dict] = None) -> torch.Tensor:
+    """Build per-element weight vector for aux loss from vocab metadata.
 
-    w = torch.ones(34, dtype=torch.float32)
-    w[0:6] = AUX_WEIGHTS["max_poly"]
-    w[6:12] = AUX_WEIGHTS["mean_poly"]
-    w[12:18] = AUX_WEIGHTS["overlap"]
-    w[18:22] = AUX_WEIGHTS["chords"]
-    w[22:34] = AUX_WEIGHTS["pc_hist"]
+    Reads the aux layout from vocab JSON to handle variable instrument counts.
+    Falls back to uniform weights if layout isn't available.
+    """
+    w = torch.ones(aux_dim, dtype=torch.float32)
+
+    # Try to parse aux layout from vocab
+    aux_meta = None
+    if vocab is not None and isinstance(vocab.get("aux"), dict):
+        aux_meta = vocab["aux"]
+
+    if aux_meta is None:
+        return w
+
+    # Determine instrument count from vocab
+    inst_names = vocab.get("instrument_names", [])
+    n_inst = len(inst_names) if inst_names else 6
+    has_chords = aux_meta.get("has_chords", n_inst == 6)
+    has_swing_blues = aux_meta.get("has_swing_blues", n_inst == 6)
+
+    # Build weight vector based on dynamic layout
+    idx = 0
+    # max_poly[N]
+    w[idx:idx+n_inst] = AUX_WEIGHTS.get("max_poly", 1.0)
+    idx += n_inst
+    # mean_poly[N]
+    if idx + n_inst <= aux_dim:
+        w[idx:idx+n_inst] = AUX_WEIGHTS.get("mean_poly", 1.0)
+        idx += n_inst
+    # overlap[N]
+    if idx + n_inst <= aux_dim:
+        w[idx:idx+n_inst] = AUX_WEIGHTS.get("overlap", 2.0)
+        idx += n_inst
+    # chord stats (4) — only if present
+    if has_chords and idx + 4 <= aux_dim:
+        w[idx:idx+4] = AUX_WEIGHTS.get("chords", 1.0)
+        idx += 4
+    # pc_hist (12)
+    if idx + 12 <= aux_dim:
+        w[idx:idx+12] = AUX_WEIGHTS.get("pc_hist", 1.0)
+        idx += 12
+    # swing + blues (2) — only if present
+    if has_swing_blues and idx + 2 <= aux_dim:
+        w[idx] = AUX_WEIGHTS.get("swing", 2.0)
+        idx += 1
+        w[idx] = AUX_WEIGHTS.get("blues", 2.0)
+        idx += 1
+
     return w
 
 class FactorizedESModel(nn.Module):
@@ -454,13 +493,15 @@ def main():
     ap.add_argument("--target_tpp", type=float, default=8.0, help="Target tokens-per-parameter for auto_scale (7–10 is a good range).")
     ap.add_argument("--max_d_model", type=int, default=256, help="Max d_model considered by auto_scale.")
     ap.add_argument("--min_params", type=int, default=100000, help="Minimum parameter budget when auto_scale is enabled.")
-    ap.add_argument("--patience", type=int, default=10, help="Early stop if val loss does not improve for this many epochs (0 disables).")
+    ap.add_argument("--patience", type=int, default=25, help="Early stop if val loss does not improve for this many epochs (0 disables).")
     ap.add_argument("--min_delta", type=float, default=1e-4, help="Minimum val-loss improvement to count as improvement (for patience reset).")
+    ap.add_argument("--keep_top_k", type=int, default=3, help="Keep the top-K best checkpoints (by val loss). 0 keeps only the latest best.")
     ap.add_argument("--d_model", type=int, default=None, help="Manual override d_model (disables auto_scale if set).")
     ap.add_argument("--n_layers", type=int, default=None, help="Manual override number of Transformer layers (disables auto_scale if set).")
     ap.add_argument("--n_heads", type=int, default=None, help="Manual override attention heads (disables auto_scale if set).")
     ap.add_argument("--ff_mult", type=int, default=None, help="Manual override FFN multiplier (dim_feedforward = d_model * ff_mult).")
     ap.add_argument("--seq_len", type=int, default=SEQ_LEN, help="Sequence length (keep at 512 unless you have a reason).")
+    ap.add_argument("--resume", default=None, help="Path to checkpoint .pt to resume training from (restores model, optimizer, epoch, best_val).")
     args = ap.parse_args()
 
     DATA_DIR   = args.data_dir
@@ -468,6 +509,49 @@ def main():
     VAL_PKL    = args.val_pkl
     VOCAB_JSON = args.vocab_json
     SAVE_PATH  = args.save_path
+
+    # ── single-instance lock ──────────────────────────────────
+    lock_path = SAVE_PATH + ".lock"
+    if os.path.exists(lock_path):
+        try:
+            other_pid = int(open(lock_path).read().strip())
+            os.kill(other_pid, 0)  # check if alive
+            print(f"ERROR: another train.py (PID {other_pid}) is already "
+                  f"writing to {SAVE_PATH}. Kill it first or use a different --save_path.")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # stale lock — previous run died
+        except PermissionError:
+            # process exists but we can't signal it (different user)
+            print(f"ERROR: another train.py is already writing to {SAVE_PATH} (lock PID in {lock_path}).")
+            sys.exit(1)
+    os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+    with open(lock_path, "w") as f:
+        f.write(str(os.getpid()))
+
+    def _remove_lock():
+        try:
+            if os.path.exists(lock_path) and open(lock_path).read().strip() == str(os.getpid()):
+                os.remove(lock_path)
+        except OSError:
+            pass
+
+    atexit.register(_remove_lock)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    # ── clean stale checkpoints from previous runs ────────────
+    # Without this, the keep_top_k pruner mixes old and new checkpoints,
+    # deleting new (worse-loss) saves when old ones from a different run exist.
+    if not args.resume:
+        base, ext = os.path.splitext(SAVE_PATH)
+        stale = globmod.glob(f"{base}_epoch*{ext}")
+        if stale:
+            print(f"Removing {len(stale)} stale checkpoint(s) from previous run")
+            for f in stale:
+                os.remove(f)
+            # remove broken symlink
+            if os.path.islink(SAVE_PATH):
+                os.remove(SAVE_PATH)
 
     # Allow seq_len override (default 512).
     SEQ_LEN = int(args.seq_len)
@@ -539,7 +623,7 @@ def main():
     val_ds   = EventDataset(VAL_PKL,   expect_aux=expect_aux)
 
     aux_dim_used = aux_dim if (AUX_ENABLED and aux_dim > 0 and train_ds.aux is not None) else 0
-    aux_wvec = _aux_weight_vector(aux_dim_used) if aux_dim_used > 0 else None
+    aux_wvec = _aux_weight_vector(aux_dim_used, vocab) if aux_dim_used > 0 else None
 
 
     # DataLoader settings (macOS uses spawn; keep collate_fn picklable)
@@ -603,6 +687,23 @@ def main():
 
     best_val = float('inf'); best_epoch = -1
     epochs_no_improve = 0
+    start_epoch = 1
+
+    # ── resume from checkpoint ─────────────────────────────────
+    if args.resume:
+        if not os.path.isfile(args.resume):
+            print(f"ERROR: --resume path not found: {args.resume}", file=sys.stderr)
+            sys.exit(1)
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        opt.load_state_dict(ckpt["optimizer_state_dict"])
+        resumed_epoch = ckpt.get("epoch", 0)
+        start_epoch = resumed_epoch + 1
+        best_val = ckpt.get("best_val", float('inf'))
+        best_epoch = ckpt.get("best_epoch", resumed_epoch)
+        # Fast-forward scheduler to the right step
+        sched.step_num = resumed_epoch * steps_per_epoch
+        print(f"Resumed from {args.resume} (epoch {resumed_epoch}, best_val={best_val:.4f}, best_epoch={best_epoch})")
 
     # ── epoch loop helpers ─────────────────────────────────────
     def run_epoch(loader, split: str):
@@ -722,7 +823,7 @@ def main():
         return avg_loss, ppl, acc_exact, avg_tloss, avg_vloss, acc_type, acc_value, avg_aux_loss, avg_aux_mae
 
     # ── main training loop ─────────────────────────────────────
-    for epoch in range(1, EPOCHS+1):
+    for epoch in range(start_epoch, EPOCHS+1):
         t0 = time.time()
         tr = run_epoch(train_loader, "train")
         va = run_epoch(val_loader, "val")
@@ -753,11 +854,16 @@ def main():
             best_val = va_loss
             best_epoch = epoch
             epochs_no_improve = 0
-            torch.save({
+
+            # ── versioned checkpoint save ─────────────────────────
+            base, ext = os.path.splitext(SAVE_PATH)
+            ckpt_path = f"{base}_epoch{epoch:03d}_val{va_loss:.4f}{ext}"
+            ckpt_payload = {
                 "epoch": epoch,
+                "best_val": best_val,
+                "best_epoch": best_epoch,
                 "model_state_dict": model.state_dict(),
                 "model_state": model.state_dict(),  # alias
-
                 "optimizer_state_dict": opt.state_dict(),
                 "factored_meta": {
                     "type_names": type_names,
@@ -774,8 +880,6 @@ def main():
                     "VOCAB_JSON": VOCAB_JSON
                 },
                 "config": {
-                    # legacy name (kept for backwards compatibility)
-
                     "D_MODEL": D_MODEL, "N_HEADS": N_HEADS, "N_LAYERS": N_LAYERS,
                     "FF_MULT": FF_MULT, "DROPOUT": DROPOUT, "SEQ_LEN": SEQ_LEN,
                     "DATA_DIR": DATA_DIR,
@@ -786,8 +890,27 @@ def main():
                     "DATA_DIR": DATA_DIR,
                     "PAD_ID": PAD_ID, "BOS_ID": BOS_ID, "EOS_ID": EOS_ID,
                 }
-            }, SAVE_PATH)
-            msg += "  → Saved best"
+            }
+            torch.save(ckpt_payload, ckpt_path)
+            # symlink SAVE_PATH → latest best for generate.py compatibility
+            tmp_link = SAVE_PATH + ".tmp"
+            os.symlink(os.path.basename(ckpt_path), tmp_link)
+            os.replace(tmp_link, SAVE_PATH)
+
+            # prune old checkpoints beyond keep_top_k
+            if args.keep_top_k > 0:
+                existing = sorted(globmod.glob(f"{base}_epoch*{ext}"))
+                # parse val loss from filename to sort by quality
+                def _val_from_name(p: str) -> float:
+                    try:
+                        return float(p.rsplit("_val", 1)[1].replace(ext, ""))
+                    except (IndexError, ValueError):
+                        return float("inf")
+                existing.sort(key=_val_from_name)
+                for old in existing[args.keep_top_k:]:
+                    os.remove(old)
+
+            msg += f"  → Saved {os.path.basename(ckpt_path)} at {time.strftime('%H:%M:%S')}"
         else:
             epochs_no_improve += 1
 
@@ -800,7 +923,7 @@ def main():
             break
 
 
-    print(f"Done. Best epoch {best_epoch} | best val loss {best_val:.3f} | saved → {SAVE_PATH}")
+    print(f"Done. Best epoch {best_epoch} | best val loss {best_val:.3f} | saved → {os.path.realpath(SAVE_PATH)}")
 
 if __name__ == "__main__":
     main()

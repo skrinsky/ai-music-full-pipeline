@@ -30,16 +30,23 @@ def prune_midi_tracks(midi_path: str, tracks_csv: str | None):
     pm.write(midi_path)
 
 def set_gm_programs(midi_path: str):
-    """
-    Set GM program numbers based on instrument.name so GM players don't default to piano.
-    pretty_midi uses 0-based GM programs.
+    """Set GM program numbers based on instrument name so GM players pick
+    appropriate sounds.  pretty_midi uses 0-based GM programs.
+
+    Note: Logic Pro 12+ defaults to GM Device tracks on MIDI import.
+    Use Option-drag to import as Software Instrument tracks instead.
     """
     GM_BY_NAME = {
         "bass": 33,     # Electric Bass (finger)
         "guitar": 27,   # Electric Guitar (clean)
-        "other": 80,    # Lead 1 (square) - adjust if you want
+        "other": 80,    # Lead 1 (square)
         "voxlead": 52,  # Choir Aahs
         "voxharm": 54,  # Synth Voice
+        # Chorale voices
+        "soprano": 73,  # Flute
+        "alto": 69,     # English Horn
+        "tenor": 71,    # Clarinet
+        "bassvox": 70,  # Bassoon
     }
     pm = pretty_midi.PrettyMIDI(midi_path)
     changed = 0
@@ -102,6 +109,8 @@ def get_args():
     ap.add_argument("--tracks", default="", help="Optional comma-separated subset of tracks to allow (overrides vocab_json). Examples: drums,bass | drums,bass,guitar | all. Aliases: voxbg/bgvox/backingvox/auxvox -> voxharm.")
 
     ap.add_argument("--max_inst_streak", type=int, default=8)
+    ap.add_argument("--max_notes_per_step", type=int, default=12,
+                    help="Max notes between TIME_SHIFT/BAR events before forcing a time advance.")
     ap.add_argument("--drum_bonus", type=float, default=0.4)
 
     # Make this a real toggle
@@ -129,6 +138,10 @@ def get_args():
                     help="How much better (relative) triplet must fit to switch (smaller = switches more).")
 
     ap.add_argument("--seed", type=int, default=None)
+
+    # ===== MIDI seed (prompt) =====
+    ap.add_argument("--seed_midi", default="", help="Path to a MIDI file to use as the opening prompt. The file is tokenized and prepended to the generation sequence.")
+    ap.add_argument("--seed_bars", type=int, default=0, help="Limit seed MIDI to the first N bars (0 = use entire file).")
     return ap.parse_args()
 
 # =================== Model ===================
@@ -288,6 +301,78 @@ def fit_error(delta_steps: int, step: int) -> float:
     nearest = nearest_multiple(delta_steps, step)
     return abs(delta_steps - nearest) / float(step)
 
+# =================== Seed MIDI ===================
+
+def tokenize_seed_midi(midi_path: str, vocab: dict, max_bars: int = 0) -> list[int]:
+    """Tokenize a MIDI file into event tokens using the training vocab.
+
+    Returns token list *without* BOS/EOS so the caller can splice it
+    into the generation sequence.
+    """
+    # Reuse the same sys.path setup as load_decoder
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    for p in [root, here]:
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+    from pre import extract_multitrack_events, tokenize_song
+
+    ev, tempo, bar_starts, bars_meta = extract_multitrack_events(midi_path)
+    if not ev:
+        raise ValueError(f"Seed MIDI {midi_path} produced zero events")
+
+    # Optionally truncate to first N bars
+    if max_bars > 0 and len(bar_starts) > max_bars:
+        cutoff_sec = float(bar_starts[max_bars])
+        ev = [(s, i, m, v, d) for (s, i, m, v, d) in ev if s < cutoff_sec]
+        if not ev:
+            raise ValueError(f"Seed MIDI has no events in the first {max_bars} bars")
+
+    tokens = tokenize_song(ev, tempo, bar_starts, bars_meta, vocab)
+    # Strip BOS and EOS — caller adds BOS and generation continues from here
+    bos = vocab["layout"]["BOS"]["start"]
+    eos = vocab["layout"]["EOS"]["start"]
+    tokens = [t for t in tokens if t != bos and t != eos]
+    return tokens
+
+
+def infer_phase_from_tokens(tokens: list[int], layout: dict, type_names: list[str]) -> tuple[str, int | None]:
+    """Walk a token sequence and return the grammar phase + last_inst
+    that the generation loop should resume from."""
+    # Build reverse lookup: global_id → type_name
+    id_to_type: dict[int, str] = {}
+    for tname in type_names:
+        spec = layout.get(tname)
+        if spec is None:
+            continue
+        for local in range(spec["size"]):
+            id_to_type[spec["start"] + local] = tname
+
+    phase = "TIME"
+    last_inst = None
+    inst_start = layout.get("INST", {}).get("start", 0)
+
+    for tok in tokens:
+        tname = id_to_type.get(tok)
+        if tname is None:
+            continue
+        if tname == "TIME_SHIFT":
+            phase = "POST_TS"
+        elif tname == "BAR":
+            phase = "INST"
+        elif tname == "INST":
+            last_inst = tok - inst_start
+            phase = "VEL"
+        elif tname == "VEL":
+            phase = "PITCH"
+        elif tname.startswith("PITCH"):
+            phase = "DUR"
+        elif tname == "DUR":
+            phase = "TIME"
+
+    return phase, last_inst
+
+
 # =================== Generation ===================
 @torch.no_grad()
 def generate(args):
@@ -393,9 +478,20 @@ def generate(args):
     print(f"Allowed tracks: {[canonical_names[i] for i in sorted(list(allowed_inst_set))]}")
 
     # grammar phases
-    def allowed_type_indices_for_phase(phase, last_inst):
+    #   TIME     = after DUR (or start): allow TIME_SHIFT, BAR, INST
+    #   POST_TS  = after TIME_SHIFT: allow BAR, INST (no consecutive TIME_SHIFT)
+    #   INST     = after BAR: allow INST only
+    def allowed_type_indices_for_phase(phase, last_inst, notes_this_step_=0):
         if phase == "TIME":
-            opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR"), maybe_idx("INST")]
+            if notes_this_step_ >= args.max_notes_per_step:
+                # Too many notes at this timestep — force time advance
+                opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR")]
+            else:
+                opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR"), maybe_idx("INST")]
+            return [i for i in opts if i is not None] or list(range(len(type_names)))
+        if phase == "POST_TS":
+            # After TIME_SHIFT: BAR (73%) or INST (27%) — never consecutive TIME_SHIFT
+            opts = [maybe_idx("BAR"), maybe_idx("INST")]
             return [i for i in opts if i is not None] or list(range(len(type_names)))
         if phase == "INST":
             return [maybe_idx("INST")] if has("INST") else list(range(len(type_names)))
@@ -414,13 +510,25 @@ def generate(args):
             return [maybe_idx("DUR")] if has("DUR") else list(range(len(type_names)))
         return [maybe_idx("TIME_SHIFT")] if has("TIME_SHIFT") else list(range(len(type_names)))
 
-    # state
-    seq = [BOS_ID]
-    phase = "TIME"
-    last_inst = None
+    # state — optionally seed from a MIDI file
+    if args.seed_midi:
+        seed_tokens = tokenize_seed_midi(args.seed_midi, vocab, max_bars=args.seed_bars)
+        seq = [BOS_ID] + seed_tokens
+        phase, last_inst = infer_phase_from_tokens(seed_tokens, layout, type_names)
+        # count notes already in the seed
+        notes_placed = sum(1 for t in seed_tokens if any(
+            layout[n]["start"] <= t < layout[n]["start"] + layout[n]["size"]
+            for n in type_names if n.startswith("PITCH")
+        ))
+        print(f"Seed MIDI: {args.seed_midi} → {len(seed_tokens)} tokens, {notes_placed} notes, resuming at phase={phase}")
+    else:
+        seq = [BOS_ID]
+        phase = "TIME"
+        last_inst = None
+        notes_placed = 0
     inst_streak = 0
-    notes_placed = 0
     since_note_tokens = 0
+    notes_this_step = 0          # notes placed since last TIME_SHIFT/BAR
 
     num_instruments = layout.get("INST", {}).get("size", 16)
     pitch_history = {i: deque(maxlen=args.pitch_hist_len) for i in range(num_instruments)}
@@ -438,7 +546,7 @@ def generate(args):
         type_logits, value_logits_list = model(ctx)
         tlog = type_logits[:, -1, :].squeeze(0)
 
-        allowed = allowed_type_indices_for_phase(phase, last_inst)
+        allowed = allowed_type_indices_for_phase(phase, last_inst, notes_this_step)
         masked = torch.full_like(tlog, -1e9)
         masked[allowed] = tlog[allowed]
         type_choice = sample_from_logits(masked, args.temperature, args.top_p)
@@ -505,8 +613,10 @@ def generate(args):
         seq.append(global_id)
 
         # transitions
-        if type_name in ("TIME_SHIFT", "BAR"):
-            phase = "TIME"; since_note_tokens += 1
+        if type_name == "TIME_SHIFT":
+            phase = "POST_TS"; since_note_tokens += 1; notes_this_step = 0
+        elif type_name == "BAR":
+            phase = "INST"; since_note_tokens += 1; notes_this_step = 0
         elif type_name == "INST":
             last_inst = int(val_local)
             inst_streak = inst_streak + 1 if last_inst is not None else 0
@@ -517,6 +627,7 @@ def generate(args):
             if last_inst is not None and last_inst != DRUM_IDX:
                 pitch_history[last_inst].append(int(val_local))
             phase = "DUR"; notes_placed += 1; since_note_tokens = 0
+            notes_this_step += 1
         elif type_name == "DUR":
             phase = "TIME"; since_note_tokens += 1
         else:
@@ -582,6 +693,8 @@ def generate(args):
         "device": device,
         "out_midi": args.out_midi,
         "sequence_len": len(seq),
+        "seed_midi": args.seed_midi or None,
+        "seed_bars": args.seed_bars if args.seed_midi else None,
         "note": "TIME_SHIFT snapped to adaptive straight/triplet grid in 1/24-qn steps."
     }
 
