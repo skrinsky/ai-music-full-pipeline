@@ -30,6 +30,7 @@ from typing import List, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import pretty_midi
 
 from training.model_cascade import CascadedESModel
 from training.generate import (
@@ -76,6 +77,10 @@ def get_args():
 
     # Generation control
     ap.add_argument("--min_notes_per_stage", type=int, default=20)
+    ap.add_argument("--max_notes_per_step", type=int, default=12,
+                    help="Max notes at one time step before forcing TIME_SHIFT/BAR")
+    ap.add_argument("--force_grid_mode", default="",
+                    help="Lock grid mode: 'straight' or 'triplet' (empty=auto)")
     ap.add_argument("--rep_penalty", type=float, default=1.20)
     ap.add_argument("--pitch_hist_len", type=int, default=16)
 
@@ -185,7 +190,11 @@ def generate_one_instrument(
     # Grammar phases for target generation
     def allowed_type_indices(phase, notes_this_step):
         if phase == "TIME":
-            opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR"), maybe_idx("INST")]
+            if notes_this_step >= args.max_notes_per_step:
+                # Too many notes at this timestep — force time advance
+                opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR")]
+            else:
+                opts = [maybe_idx("TIME_SHIFT"), maybe_idx("BAR"), maybe_idx("INST")]
             return [i for i in opts if i is not None]
         if phase == "POST_TS":
             opts = [maybe_idx("BAR"), maybe_idx("INST")]
@@ -220,7 +229,7 @@ def generate_one_instrument(
 
     # Grid snapping state
     max_delta_steps = ts_size
-    grid_mode = "straight"
+    grid_mode = args.force_grid_mode or "straight"
     recent_deltas: deque = deque(maxlen=24)
 
     # Pitch repetition penalty
@@ -315,6 +324,19 @@ def generate_one_instrument(
             break
 
     return generated_tokens
+
+
+def enforce_monophony(midi_path: str) -> None:
+    """Clip overlapping durations so each track is strictly monophonic."""
+    pm = pretty_midi.PrettyMIDI(midi_path)
+    for inst in pm.instruments:
+        if inst.is_drum:
+            continue
+        inst.notes.sort(key=lambda n: (n.start, n.pitch))
+        for i in range(len(inst.notes) - 1):
+            if inst.notes[i].end > inst.notes[i + 1].start:
+                inst.notes[i].end = inst.notes[i + 1].start
+    pm.write(midi_path)
 
 
 @torch.no_grad()
@@ -494,6 +516,7 @@ def generate_cascade(args):
 
     full_tokens = tokenize_song(all_events_raw, 120.0, bar_starts, bars_meta, vocab)
     decode_to_midi(full_tokens, vocab, args.out_midi, tempo_bpm=120.0)
+    enforce_monophony(args.out_midi)
 
     set_gm_programs(args.out_midi)
     print(f"Wrote MIDI → {args.out_midi}")
