@@ -760,9 +760,58 @@ Plan: Chorale key normalization + remove transposition augmentation
   │ Tenor acc      │ 0.6%    │ 73.3%    │ Weakest but still improving │
   └────────────────┴─────────┴──────────┴─────────────────────────────┘
 
-  The model is learning fast -- val perplexity of 1.80 and 84% accuracy at epoch 42. Loss is still improving every epoch (no patience countdown yet). Epochs take ~6-10 minutes each, with one outlier at 28 minutes (epoch 42).
+  The model is learning fast -- val perplexity of 1.80 and 84%
+  accuracy at epoch 42. Loss is still improving every epoch (no
+  patience countdown yet). Epochs take ~6-10 minutes each, with one
+  outlier at 28 minutes (epoch 42).
 
-  Tenor is the weakest voice at 73%, which makes sense -- it's the last in the sequence and the most constrained by the other three voices. It's still improving steadily.
+  Tenor is the weakest voice at 73%, which makes sense -- it's the
+  last in the sequence and the most constrained by the other three
+  voices. It's still improving steadily.
 
-------------------------------------------------------------------------------------------------------------------------
-------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------
+
+2026-02-28
+
+⏺ Everything is pushed. Final model: epoch 284, val_loss=0.447, 88.8% accuracy.
+
+  Regarding closing the gap with TonicNet, here are the key differences I see:
+
+  What TonicNet has that we don't:
+
+  1. GRU architecture -- TonicNet uses a 3-layer GRU, which is
+     inherently sequential and may model voice leading better than our
+     Transformer for these relatively short sequences
+
+  2. Learned voice coupling -- TonicNet conditions each voice on
+     previously generated voices within the same timestep
+     (autoregressive within timestep), while we predict all 5 tokens
+     per timestep from only prior timesteps
+
+  3. Tonal conditioning -- TonicNet has explicit key/mode conditioning
+
+  4. NLL metric -- TonicNet reports NLL per note (~0.28 nats), hard to
+     compare directly with our cross-entropy over the mixed
+     chord+voice vocab
+
+  Possible Phase 2 directions:
+
+  - Intra-timestep autoregression: condition each voice on previously
+    generated voices in the same step (chord→soprano→bass→alto→tenor
+    as true causal chain, not just positional)
+
+  - Teacher forcing within timestep: during training, use ground truth
+    for earlier voices when predicting later ones
+
+  - Key/mode token: prepend a key token to each sequence
+
+  - GRU baseline: implement a simple GRU model with the same
+    tokenization for direct comparison
+
+  - Separate voice heads: instead of one softmax over 100 tokens, use
+    voice-specific heads that share the trunk
+
+  Would you like to explore any of these directions?
+  
+-------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------
