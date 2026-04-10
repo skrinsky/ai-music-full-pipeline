@@ -67,18 +67,18 @@ def decode_to_midi(tokenizer, token_ids: list[int], out_path: Path):
     token_strs = [rev_vocab[i] for i in token_ids if i in rev_vocab]
     clean_ids  = [i for i in token_ids if i in rev_vocab]
 
-    last_exc = None
+    errors = []
 
-    # Try 1: list of token strings (works in many v2 builds)
+    # Try 1: list of token strings (v1.x / some v2.x)
     try:
         midi_out = tokenizer.tokens_to_midi([token_strs])
         midi_out.dump(str(out_path))
         print(f"Saved MIDI → {out_path}")
         return
     except Exception as exc:
-        last_exc = exc
+        errors.append(f"Try1 (list-of-strings): {exc}")
 
-    # Try 2: TokSequence with both ids and tokens populated
+    # Try 2: TokSequence with both ids and tokens populated (v2.x)
     try:
         tok_seq  = TokSequence(ids=clean_ids, tokens=token_strs)
         midi_out = tokenizer.tokens_to_midi([tok_seq])
@@ -86,9 +86,22 @@ def decode_to_midi(tokenizer, token_ids: list[int], out_path: Path):
         print(f"Saved MIDI → {out_path}")
         return
     except Exception as exc:
-        last_exc = exc
+        errors.append(f"Try2 (TokSequence): {exc}")
 
-    print(f"MIDI decode failed: {last_exc}")
+    # Try 3: tokenizer.__call__ bidirectional dispatch (v3.x)
+    try:
+        tok_seq  = TokSequence(ids=clean_ids, tokens=token_strs)
+        midi_out = tokenizer(tok_seq)
+        midi_out.dump(str(out_path))
+        print(f"Saved MIDI → {out_path}")
+        return
+    except Exception as exc:
+        errors.append(f"Try3 (tokenizer.__call__): {exc}")
+
+    import miditok as _mt
+    print(f"MIDI decode failed (miditok {_mt.__version__}):")
+    for e in errors:
+        print(f"  {e}")
     fallback = out_path.with_suffix(".tokens.json")
     fallback.write_text(json.dumps(token_ids))
     print(f"Raw token IDs saved → {fallback}  (for debugging)")
