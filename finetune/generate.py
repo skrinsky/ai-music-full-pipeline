@@ -53,28 +53,45 @@ def decode_to_midi(tokenizer, token_ids: list[int], out_path: Path):
     """
     Convert a flat list of token IDs back to a MIDI file.
 
-    MidiTok v2.x tokens_to_midi expects TokSequence with both .ids and .tokens
-    (the string token names).  Build the reverse vocab to fill that in.
+    Different miditok versions expect different input formats for tokens_to_midi:
+      v1.x / some v2.x: list of list-of-strings  (tokens_to_midi([[str, str, ...]]))
+      v2.x TokSequence: list of TokSequence objects
+    We try both.
     """
     from miditok import TokSequence
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Build reverse vocab: int ID → token string
-    rev_vocab = {v: k for k, v in tokenizer.vocab.items()}
+    rev_vocab  = {v: k for k, v in tokenizer.vocab.items()}
     token_strs = [rev_vocab[i] for i in token_ids if i in rev_vocab]
     clean_ids  = [i for i in token_ids if i in rev_vocab]
 
-    tok_seq = TokSequence(ids=clean_ids, tokens=token_strs)
+    last_exc = None
+
+    # Try 1: list of token strings (works in many v2 builds)
     try:
+        midi_out = tokenizer.tokens_to_midi([token_strs])
+        midi_out.dump(str(out_path))
+        print(f"Saved MIDI → {out_path}")
+        return
+    except Exception as exc:
+        last_exc = exc
+
+    # Try 2: TokSequence with both ids and tokens populated
+    try:
+        tok_seq  = TokSequence(ids=clean_ids, tokens=token_strs)
         midi_out = tokenizer.tokens_to_midi([tok_seq])
         midi_out.dump(str(out_path))
         print(f"Saved MIDI → {out_path}")
+        return
     except Exception as exc:
-        print(f"MIDI decode failed: {exc}")
-        fallback = out_path.with_suffix(".tokens.json")
-        fallback.write_text(json.dumps(token_ids))
-        print(f"Raw token IDs saved → {fallback}  (for debugging)")
+        last_exc = exc
+
+    print(f"MIDI decode failed: {last_exc}")
+    fallback = out_path.with_suffix(".tokens.json")
+    fallback.write_text(json.dumps(token_ids))
+    print(f"Raw token IDs saved → {fallback}  (for debugging)")
 
 
 def main():

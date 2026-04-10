@@ -311,7 +311,7 @@ ft-generate fg: $(FT_ADAPTER)/best ## Generate MIDI from finetuned model
 	  --tokenizer_config $(FT_DATA_DIR)/tokenizer_config.json \
 	  --out_midi         $(FT_GENERATED)/out.mid \
 	  --device auto $(ARGS)
-	open $(FT_GENERATED)/out.mid
+	@echo "Output: $(FT_GENERATED)/out.mid"
 
 $(FT_DATA_DIR)/train_ids.npy:
 	$(PYTHON) finetune/convert.py \
