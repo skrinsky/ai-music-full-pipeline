@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -112,7 +112,7 @@ chorale-browse: data/chorales_midi/.converted ## Browse + play chorale MIDIs (tk
 	$(PYTHON) scripts/midi_browser.py --folder $(CHORALE_MIDI) $(ARGS)
 
 chorale-preprocess: data/chorales_midi/.converted ## Preprocess chorale MIDIs → event tokens
-	$(PYTHON) training/pre.py --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_EVENTS) --instrument_set chorale4 $(ARGS)
+	$(PYTHON) training/pre.py --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_EVENTS) --instrument_set chorale4 --seq_len 1024 $(ARGS)
 
 chorale-train: $(CHORALE_EVENTS)/events_train.pkl ## Train on preprocessed chorale events
 	$(PYTHON) training/train.py \
@@ -121,6 +121,7 @@ chorale-train: $(CHORALE_EVENTS)/events_train.pkl ## Train on preprocessed chora
 	  --val_pkl $(CHORALE_EVENTS)/events_val.pkl \
 	  --vocab_json $(CHORALE_EVENTS)/event_vocab.json \
 	  --save_path $(CHORALE_CKPT) \
+	  --seq_len 1024 \
 	  --device auto $(ARGS)
 
 chorale-resume: $(CHORALE_CKPT) ## Resume chorale training from latest checkpoint
@@ -137,7 +138,7 @@ chorale-retrain: ## make chorale-preprocess && make chorale-train
 	make chorale-preprocess && make chorale-train
 
 $(CHORALE_EVENTS)/events_train.pkl: data/chorales_midi/.converted
-	$(PYTHON) training/pre.py --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_EVENTS) --instrument_set chorale4
+	$(PYTHON) training/pre.py --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_EVENTS) --instrument_set chorale4 --seq_len 1024
 
 chorale-generate cg: $(CHORALE_CKPT) ## Generate chorale MIDI from trained model
 	$(PYTHON) training/generate.py \
@@ -275,3 +276,51 @@ chorale-dense-generate cdg: $(CHORALE_DENSE_CKPT) ## Generate dense chorale MIDI
 	  --ckpt $(CHORALE_DENSE_CKPT) \
 	  --out_midi runs/generated/chorale_dense_out.mid \
 	  --device auto $(ARGS)
+
+# ---------------------------------------------------------------------------
+# Finetuning pipeline  (finetune/ folder)
+# Starts from Natooz/Multitrack-Music-Transformer (pre-trained on ~170k MIDIs)
+# and LoRA-adapts to your personal tracks.
+# ---------------------------------------------------------------------------
+
+FT_MIDI_DIR := summer_midi          # your personal tracks — override with ARGS or FT_MIDI_DIR=...
+FT_DATA_DIR := finetune/runs/my_data
+FT_ADAPTER  := finetune/runs/adapter
+FT_GENERATED := finetune/runs/generated
+BASE_MODEL  := Natooz/Multitrack-Music-Transformer
+
+ft-install: ## Install finetuning deps into the active venv
+	$(PYTHON) -m pip install -r finetune/requirements.txt
+
+ft-convert: ## Tokenize your MIDI files for finetuning (FT_MIDI_DIR=summer_midi)
+	$(PYTHON) finetune/convert.py \
+	  --midi_dir $(FT_MIDI_DIR) \
+	  --out_dir  $(FT_DATA_DIR) $(ARGS)
+
+ft-train: $(FT_DATA_DIR)/train_ids.npy ## LoRA-finetune from pre-trained music model
+	$(PYTHON) finetune/finetune.py \
+	  --data_dir   $(FT_DATA_DIR) \
+	  --out_dir    $(FT_ADAPTER) \
+	  --base_model $(BASE_MODEL) \
+	  --device auto $(ARGS)
+
+ft-generate fg: $(FT_ADAPTER)/best ## Generate MIDI from finetuned model
+	$(PYTHON) finetune/generate.py \
+	  --base_model       $(BASE_MODEL) \
+	  --adapter          $(FT_ADAPTER)/best \
+	  --tokenizer_config $(FT_DATA_DIR)/tokenizer_config.json \
+	  --out_midi         $(FT_GENERATED)/out.mid \
+	  --device auto $(ARGS)
+	open $(FT_GENERATED)/out.mid
+
+$(FT_DATA_DIR)/train_ids.npy:
+	$(PYTHON) finetune/convert.py \
+	  --midi_dir $(FT_MIDI_DIR) \
+	  --out_dir  $(FT_DATA_DIR)
+
+$(FT_ADAPTER)/best:
+	$(PYTHON) finetune/finetune.py \
+	  --data_dir   $(FT_DATA_DIR) \
+	  --out_dir    $(FT_ADAPTER) \
+	  --base_model $(BASE_MODEL) \
+	  --device auto
