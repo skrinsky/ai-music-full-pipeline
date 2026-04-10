@@ -51,18 +51,23 @@ def build_prompt(tokenizer, prompt_midi: str | None, prompt_tokens: int, bos_id:
 
 def decode_to_midi(tokenizer, token_ids: list[int], out_path: Path):
     """
-    Convert a flat list of MMT token IDs back to a MIDI file.
+    Convert a flat list of token IDs back to a MIDI file.
 
-    MidiTok v2.x:  tokenizer.tokens_to_midi(list_of_TokSequence) → MidiFile
-    The TokSequence needs at minimum the .ids field; the tokenizer fills in
-    the rest during decoding.
+    MidiTok v2.x tokens_to_midi expects TokSequence with both .ids and .tokens
+    (the string token names).  Build the reverse vocab to fill that in.
     """
     from miditok import TokSequence
 
-    tok_seq = TokSequence(ids=token_ids)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build reverse vocab: int ID → token string
+    rev_vocab = {v: k for k, v in tokenizer.vocab.items()}
+    token_strs = [rev_vocab[i] for i in token_ids if i in rev_vocab]
+    clean_ids  = [i for i in token_ids if i in rev_vocab]
+
+    tok_seq = TokSequence(ids=clean_ids, tokens=token_strs)
     try:
         midi_out = tokenizer.tokens_to_midi([tok_seq])
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         midi_out.dump(str(out_path))
         print(f"Saved MIDI → {out_path}")
     except Exception as exc:
