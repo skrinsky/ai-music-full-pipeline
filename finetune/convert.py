@@ -32,14 +32,34 @@ SEED = 42
 
 
 def load_tokenizer(config_path: Path | None):
-    from miditok import MMT
+    # Try multi-track tokenizers in order of preference.
+    # MMT (Multitrack Music Transformer) is ideal but was added in miditok v2.x.
+    # REMIPlus also handles multi-track. REMI is single-track but universally available.
+    tok_cls = None
+    tok_name = None
+    for name in ("MMT", "REMIPlus", "REMI"):
+        try:
+            import miditok
+            tok_cls = getattr(miditok, name)
+            tok_name = name
+            break
+        except AttributeError:
+            continue
+
+    if tok_cls is None:
+        raise ImportError("Could not find a usable tokenizer in miditok. Run: make ft-install")
+
+    if tok_name != "MMT":
+        print(f"Note: MMT not available in this miditok version — using {tok_name} instead.")
+        if tok_name == "REMI":
+            print("      REMI is single-track; multi-instrument MIDIs will be flattened.")
 
     if config_path and config_path.exists():
-        tok = MMT(params=config_path)
+        tok = tok_cls(params=config_path)
         print(f"Loaded tokenizer config from {config_path}")
     else:
-        tok = MMT()
-        print("Using default MMT tokenizer config")
+        tok = tok_cls()
+        print(f"Using default {tok_name} tokenizer config")
     return tok
 
 

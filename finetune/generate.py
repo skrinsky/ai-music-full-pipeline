@@ -99,9 +99,15 @@ def main():
     ) if args.device == "auto" else args.device
     print(f"Device: {device}")
 
-    # Tokenizer
-    from miditok import MMT
-    tokenizer = MMT(params=Path(args.tokenizer_config))
+    # Tokenizer — use whichever class was available when convert.py ran.
+    import miditok as _miditok
+    _tok_cls = next(
+        (getattr(_miditok, n) for n in ("MMT", "REMIPlus", "REMI") if hasattr(_miditok, n)),
+        None,
+    )
+    if _tok_cls is None:
+        raise ImportError("No usable tokenizer found in miditok. Run: make ft-install")
+    tokenizer = _tok_cls(params=Path(args.tokenizer_config))
     bos_id = get_special_id(tokenizer, ["BOS_None", "BOS", "<BOS>"], fallback=1)
     eos_id = get_special_id(tokenizer, ["EOS_None", "EOS", "<EOS>"], fallback=2)
     pad_id = get_special_id(tokenizer, ["PAD_None", "PAD", "<PAD>"], fallback=0)
