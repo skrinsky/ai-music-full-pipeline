@@ -3,6 +3,7 @@
 #
 # MidiTok v2.x uses miditoolkit under the hood.
 # v3.x switched to symusic — pin to 2.x for now to avoid API churn.
+torch>=2.4.0
 miditok>=2.1.7,<3.0.0
 transformers>=4.40.0
 peft>=0.10.0
