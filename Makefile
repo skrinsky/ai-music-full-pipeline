@@ -287,7 +287,7 @@ FT_MIDI_DIR := summer_midi          # your personal tracks — override with ARG
 FT_DATA_DIR := finetune/runs/my_data
 FT_ADAPTER  := finetune/runs/adapter
 FT_GENERATED := finetune/runs/generated
-BASE_MODEL  := Natooz/Multitrack-Music-Transformer
+BASE_MODEL  := NathanFradet/Maestro-REMI-bpe20k
 
 ft-install: ## Install finetuning deps into the active venv
 	$(PYTHON) -m pip install -r finetune/requirements.txt

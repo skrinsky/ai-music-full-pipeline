@@ -116,8 +116,18 @@ def main():
     # Model + adapter
     from transformers import AutoModelForCausalLM
     from peft import PeftModel
+    import json as _json
     print(f"Loading base model: {args.base_model}")
-    base  = AutoModelForCausalLM.from_pretrained(args.base_model)
+    base = AutoModelForCausalLM.from_pretrained(args.base_model)
+    # If training resized the embeddings, match that before loading the adapter.
+    # The tokenizer_config lives next to train_ids.npy in the data dir.
+    _data_dir = Path(args.tokenizer_config).parent
+    _meta_path = _data_dir / "meta.json"
+    if _meta_path.exists():
+        _vocab_size = _json.loads(_meta_path.read_text())["vocab_size"]
+        if base.config.vocab_size != _vocab_size:
+            print(f"Resizing embeddings: {base.config.vocab_size} → {_vocab_size}")
+            base.resize_token_embeddings(_vocab_size)
     model = PeftModel.from_pretrained(base, args.adapter)
     model = model.to(device)
     model.eval()
