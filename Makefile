@@ -348,8 +348,9 @@ noto-train: $(NOTO_DATA)/meta.json ## Fine-tune Notochord on personal MIDI data
 
 noto-generate ng: $(NOTO_FT_CKPT) ## Generate MIDI from fine-tuned Notochord
 	$(PYTHON) finetune/notochord_generate.py \
-	  --checkpoint $(NOTO_FT_CKPT) \
-	  --out_midi   $(NOTO_GEN) \
+	  --checkpoint      $(NOTO_FT_CKPT) \
+	  --base_checkpoint $(NOTO_CKPT) \
+	  --out_midi        $(NOTO_GEN) \
 	  --device auto $(ARGS)
 	@echo "Output: $(NOTO_GEN)"
 

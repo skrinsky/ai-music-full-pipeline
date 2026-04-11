@@ -99,7 +99,11 @@ def events_to_midi(events: list[dict], out_path: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint",   required=True)
+    ap.add_argument("--checkpoint",      required=True,
+                    help="Fine-tuned checkpoint .pt file")
+    ap.add_argument("--base_checkpoint", default=None,
+                    help="Original pre-trained checkpoint (needed if fine-tuned ckpt "
+                         "was saved without architecture kwargs, e.g. kw={})")
     ap.add_argument("--out_midi",     required=True)
     ap.add_argument("--prompt_midi",  default=None,
                     help="Optional: prime the model from this MIDI before generating")
@@ -120,7 +124,17 @@ def main():
     print(f"Device: {device}")
 
     print(f"Loading: {args.checkpoint}")
-    model = Notochord.from_checkpoint(args.checkpoint)
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+
+    # If the fine-tuned checkpoint has empty kw (saved by old buggy code),
+    # load architecture from the base checkpoint instead.
+    if not ckpt.get("kw") and args.base_checkpoint:
+        print(f"  kw empty — loading architecture from {args.base_checkpoint}")
+        model = Notochord.from_checkpoint(args.base_checkpoint)
+        model.load_state_dict(ckpt["model_state"])
+    else:
+        model = Notochord.from_checkpoint(args.checkpoint)
+
     model = model.to(device)
     model.eval()
 

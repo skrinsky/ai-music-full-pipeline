@@ -98,8 +98,10 @@ def main():
     meta     = json.loads((data_dir / "meta.json").read_text())
     print(f"Train: {meta['n_train']}  Val: {meta['n_val']}  seq_len: {meta['seq_len']}")
 
-    # Load pre-trained model
+    # Load pre-trained model — also keep the raw kw so we can re-save it
     print(f"Loading checkpoint: {args.checkpoint}")
+    raw_ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    base_kw  = raw_ckpt.get("kw", {})
     model = Notochord.from_checkpoint(args.checkpoint)
     model = model.to(device)
 
@@ -139,7 +141,7 @@ def main():
             # Save in the same format as the original Notochord checkpoint
             torch.save({
                 "model_state":     model.state_dict(),
-                "kw":              {},   # architecture already in the model object
+                "kw":              base_kw,   # preserve original architecture kwargs
                 "optimizer_state": optimizer.state_dict(),
                 "step":            epoch,
                 "random_state":    torch.get_rng_state(),
