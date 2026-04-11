@@ -51,13 +51,14 @@ def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 4.0
     abs_time = 0.0
     for ev in events:
         abs_time += ev["time"]
-        inst_id = ev["instrument"]
-        pitch   = ev["pitch"]
-        vel     = int(ev["velocity"])
+        inst_id = int(ev["instrument"])
+        pitch   = max(0, min(127, int(ev["pitch"])))
+        vel     = max(0, min(127, int(ev["velocity"])))
 
         if inst_id not in tracks:
             is_drum = (inst_id == 128)
-            program = 0 if is_drum else inst_id
+            # Clamp program to 0-127 regardless of what the model emitted
+            program = max(0, min(127, 0 if is_drum else inst_id))
             tracks[inst_id] = pretty_midi.Instrument(
                 program=program, is_drum=is_drum,
                 name=f"inst_{inst_id}")
@@ -67,7 +68,7 @@ def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 4.0
             # If this pitch is already open, close it first (implicit note-off)
             if key in pending:
                 close_note(inst_id, pitch, abs_time)
-            pending[key] = (abs_time, max(1, min(127, vel)))
+            pending[key] = (abs_time, max(1, vel))
         else:
             close_note(inst_id, pitch, abs_time)
 

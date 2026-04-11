@@ -136,7 +136,7 @@ def main():
     save_split(train_chunks, "train")
     save_split(val_chunks,   "val")
 
-    instruments_sorted = sorted(seen_instruments)
+    instruments_sorted = sorted(int(i) for i in seen_instruments)
     print(f"Instruments seen (GM program or 128=drums): {instruments_sorted}")
 
     meta = {
