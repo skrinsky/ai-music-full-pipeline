@@ -9,13 +9,15 @@ model starts with context from your style.
 Usage:
     python finetune/notochord_generate.py \\
         --checkpoint finetune/runs/noto_finetuned.pt \\
+        --data_dir   finetune/runs/noto_data \\
         --out_midi   finetune/runs/generated/noto_out.mid
 
     # Prime from one of your tracks:
     python finetune/notochord_generate.py \\
-        --checkpoint finetune/runs/noto_finetuned.pt \\
+        --checkpoint  finetune/runs/noto_finetuned.pt \\
+        --data_dir    finetune/runs/noto_data \\
         --prompt_midi summer_midi/my_song.mid \\
-        --out_midi   finetune/runs/generated/noto_continuation.mid
+        --out_midi    finetune/runs/generated/noto_continuation.mid
 """
 
 import argparse
@@ -27,12 +29,10 @@ import torch
 from notochord import Notochord
 
 
-
-def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 4.0):
+def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 2.0):
     """Convert a list of {instrument, pitch, time, velocity} dicts to a MIDI file."""
     pm = pretty_midi.PrettyMIDI()
 
-    # Collect note_on / note_off pairs per (instrument, pitch)
     tracks: dict[int, pretty_midi.Instrument] = {}
     # (inst, pitch) → (note_on absolute time, velocity)
     pending: dict[tuple, tuple[float, int]] = {}
@@ -57,7 +57,6 @@ def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 4.0
 
         if inst_id not in tracks:
             is_drum = (inst_id == 128)
-            # Clamp program to 0-127 regardless of what the model emitted
             program = max(0, min(127, 0 if is_drum else inst_id))
             tracks[inst_id] = pretty_midi.Instrument(
                 program=program, is_drum=is_drum,
@@ -65,14 +64,13 @@ def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 4.0
 
         key = (inst_id, pitch)
         if vel > 0:
-            # If this pitch is already open, close it first (implicit note-off)
             if key in pending:
                 close_note(inst_id, pitch, abs_time)
             pending[key] = (abs_time, max(1, vel))
         else:
             close_note(inst_id, pitch, abs_time)
 
-    # Close any notes still open — cap at max_note_dur so one note doesn't span the piece
+    # Close open notes — cap duration so nothing hangs to end of piece
     for (inst_id, pitch), (on_time, on_vel) in list(pending.items()):
         end_time = min(on_time + max_note_dur, abs_time + 0.25)
         tracks[inst_id].notes.append(pretty_midi.Note(
@@ -89,27 +87,45 @@ def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 4.0
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint",      required=True,
-                    help="Fine-tuned checkpoint .pt file")
+    ap = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument("--checkpoint",      required=True)
     ap.add_argument("--base_checkpoint", default=None,
-                    help="Original pre-trained checkpoint (needed if fine-tuned ckpt "
-                         "was saved without architecture kwargs, e.g. kw={})")
-    ap.add_argument("--out_midi",     required=True)
-    ap.add_argument("--prompt_midi",  default=None,
-                    help="Optional: prime the model from this MIDI before generating")
-    ap.add_argument("--n_events",     type=int,   default=1000,
-                    help="Number of events to generate (~1000 ≈ 60–90s of music)")
-    ap.add_argument("--temperature",  type=float, default=0.9,
-                    help="Sampling temperature for instrument and pitch heads")
-    ap.add_argument("--max_time",     type=float, default=2.0,
-                    help="Max seconds between events (prevents long silences)")
-    ap.add_argument("--max_note_dur", type=float, default=4.0,
-                    help="Cap note duration (seconds) — prevents stuck open notes")
-    ap.add_argument("--data_dir",     default=None,
-                    help="notochord_convert.py output dir — used to read the instrument "
-                         "list so generation stays in-distribution")
-    ap.add_argument("--device",       default="auto")
+                    help="Original pre-trained checkpoint — needed when fine-tuned "
+                         "ckpt was saved without architecture kwargs (kw={})")
+    ap.add_argument("--data_dir",        default=None,
+                    help="notochord_convert.py output dir — reads instrument list "
+                         "from meta.json to keep generation in-distribution")
+    ap.add_argument("--out_midi",        required=True)
+    ap.add_argument("--prompt_midi",     default=None,
+                    help="Prime the model's hidden state from this MIDI file")
+
+    ap.add_argument("--n_events",        type=int,   default=1000,
+                    help="Events to generate (~1000 ≈ 60-90s)")
+
+    # Sampling temperatures — lower = model sticks closer to what it learned,
+    # higher = more random/exploratory.  0.9 was too chaotic for all heads.
+    ap.add_argument("--pitch_temp",      type=float, default=0.7,
+                    help="Pitch temperature (lower = more tonal coherence)")
+    ap.add_argument("--rhythm_temp",     type=float, default=0.8,
+                    help="Rhythm/timing temperature (lower = more regular feel)")
+    ap.add_argument("--velocity_temp",   type=float, default=0.8,
+                    help="Velocity temperature")
+    ap.add_argument("--instrument_temp", type=float, default=0.8,
+                    help="Instrument temperature")
+
+    # Timing bounds — keep events close together so there are no dead silences
+    ap.add_argument("--max_time",        type=float, default=0.5,
+                    help="Max seconds between events")
+    ap.add_argument("--min_time",        type=float, default=0.03,
+                    help="Min seconds between events")
+
+    ap.add_argument("--max_note_dur",    type=float, default=2.0,
+                    help="Cap note duration (seconds)")
+    ap.add_argument("--max_polyphony",   type=int,   default=4,
+                    help="Max simultaneous notes per instrument (0 = unlimited)")
+
+    ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
     device = (
@@ -119,22 +135,19 @@ def main():
     ) if args.device == "auto" else args.device
     print(f"Device: {device}")
 
+    # Load model ---------------------------------------------------------------
     print(f"Loading: {args.checkpoint}")
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-
-    # If the fine-tuned checkpoint has empty kw (saved by old buggy code),
-    # load architecture from the base checkpoint instead.
     if not ckpt.get("kw") and args.base_checkpoint:
         print(f"  kw empty — loading architecture from {args.base_checkpoint}")
         model = Notochord.from_checkpoint(args.base_checkpoint)
         model.load_state_dict(ckpt["model_state"])
     else:
         model = Notochord.from_checkpoint(args.checkpoint)
-
     model = model.to(device)
     model.eval()
 
-    # Load instrument list from training data so generation stays in-distribution
+    # Instrument filter from training data ------------------------------------
     include_inst = None
     if args.data_dir:
         meta_path = Path(args.data_dir) / "meta.json"
@@ -142,13 +155,13 @@ def main():
             meta = json.loads(meta_path.read_text())
             include_inst = meta.get("instruments")
             if include_inst:
-                print(f"Constraining to {len(include_inst)} instruments from training: {include_inst}")
+                print(f"Instruments ({len(include_inst)}): {include_inst}")
             else:
-                print("meta.json has no 'instruments' key — re-run noto-convert to add it")
+                print("meta.json missing 'instruments' — re-run noto-convert to add it")
         else:
-            print(f"meta.json not found at {meta_path}")
+            print(f"Warning: meta.json not found at {meta_path}")
 
-    # Prime from a MIDI file if provided
+    # Prime --------------------------------------------------------------------
     model.reset()
     if args.prompt_midi:
         print(f"Priming from {args.prompt_midi} …")
@@ -157,30 +170,52 @@ def main():
         except Exception as exc:
             print(f"  prompt() failed: {exc} — starting from scratch")
 
-    # Generate events autoregressively
-    print(f"Generating {args.n_events} events …")
+    # Generate -----------------------------------------------------------------
+    print(f"Generating {args.n_events} events …  "
+          f"pitch_temp={args.pitch_temp}  rhythm_temp={args.rhythm_temp}")
     events = []
+    open_notes: dict[int, list[int]] = {}  # inst → list of currently-sounding pitches
+
     with torch.no_grad():
         for i in range(args.n_events):
             try:
                 ev = model.query(
+                    min_time=args.min_time,
                     max_time=args.max_time,
-                    include_inst=include_inst,  # None = unconstrained
+                    include_inst=include_inst,
+                    pitch_temp=args.pitch_temp,
+                    rhythm_temp=args.rhythm_temp,
+                    timing_temp=args.rhythm_temp,
+                    velocity_temp=args.velocity_temp,
+                    instrument_temp=args.instrument_temp,
                 )
-                # query() returns a dict with instrument, pitch, time, vel
-                events.append({
-                    "instrument": int(ev.get("instrument", ev.get("inst", 0))),
-                    "pitch":      int(ev.get("pitch", 60)),
-                    "time":       float(ev.get("time", 0.1)),
-                    "velocity":   float(ev.get("vel", ev.get("velocity", 64))),
-                })
-                # Feed the event back into the model
-                model.feed(
-                    inst=events[-1]["instrument"],
-                    pitch=events[-1]["pitch"],
-                    time=events[-1]["time"],
-                    vel=events[-1]["velocity"],
-                )
+
+                inst  = int(ev.get("instrument", ev.get("inst", 0)))
+                pitch = int(ev.get("pitch", 60))
+                dt    = float(ev.get("time", 0.1))
+                vel   = float(ev.get("vel", ev.get("velocity", 64)))
+
+                # Polyphony cap: if this instrument is already at the limit,
+                # turn the oldest open note off instead of adding another
+                if args.max_polyphony > 0 and vel > 0:
+                    open_now = open_notes.get(inst, [])
+                    if len(open_now) >= args.max_polyphony:
+                        pitch = open_now[0]
+                        vel   = 0.0
+
+                # Track open notes
+                if vel > 0:
+                    open_notes.setdefault(inst, [])
+                    if pitch not in open_notes[inst]:
+                        open_notes[inst].append(pitch)
+                else:
+                    if inst in open_notes and pitch in open_notes[inst]:
+                        open_notes[inst].remove(pitch)
+
+                events.append({"instrument": inst, "pitch": pitch,
+                                "time": dt, "velocity": vel})
+                model.feed(inst=inst, pitch=pitch, time=dt, vel=vel)
+
             except Exception as exc:
                 print(f"  Event {i}: {exc}")
                 break
