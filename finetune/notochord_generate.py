@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 
@@ -29,8 +30,26 @@ import torch
 from notochord import Notochord
 
 
+def notochord_inst_to_pretty_midi(inst_id: int) -> tuple[int, bool]:
+    """Map Notochord instrument ids back to PrettyMIDI program/is_drum."""
+    if 129 <= inst_id <= 256:
+        return max(0, min(127, inst_id - 129)), True
+    if 1 <= inst_id <= 128:
+        return max(0, min(127, inst_id - 1)), False
+    if 257 <= inst_id <= 288:
+        return 0, False
+    if 289 <= inst_id <= 320:
+        return 0, True
+    # Backward compatibility with older local data conventions:
+    if inst_id == 128:
+        return 0, True
+    return max(0, min(127, inst_id)), False
+
+
 def events_to_midi(events: list[dict], out_path: Path,
-                   max_note_dur: float = 2.0, max_polyphony: int = 0):
+                   max_note_dur: float = 2.0, max_polyphony: int = 0,
+                   inst_to_program: dict[int, int] | None = None,
+                   inst_is_drum: dict[int, bool] | None = None):
     """Convert a list of {instrument, pitch, time, velocity} dicts to a MIDI file."""
     pm = pretty_midi.PrettyMIDI()
 
@@ -61,8 +80,11 @@ def events_to_midi(events: list[dict], out_path: Path,
         vel     = max(0, min(127, int(ev["velocity"])))
 
         if inst_id not in tracks:
-            is_drum = (inst_id == 128)
-            program = max(0, min(127, 0 if is_drum else inst_id))
+            if inst_to_program and inst_id in inst_to_program:
+                program = max(0, min(127, int(inst_to_program[inst_id])))
+                is_drum = bool(inst_is_drum.get(inst_id, inst_id >= 129)) if inst_is_drum else inst_id >= 129
+            else:
+                program, is_drum = notochord_inst_to_pretty_midi(inst_id)
             tracks[inst_id] = pretty_midi.Instrument(
                 program=program, is_drum=is_drum,
                 name=f"inst_{inst_id}")
@@ -135,6 +157,15 @@ def main():
                     help="Cap note duration (seconds)")
     ap.add_argument("--max_polyphony",   type=int,   default=0,
                     help="Max simultaneous notes per instrument (0 = let model decide)")
+    ap.add_argument("--max_inst_streak", type=int,   default=0,
+                    help="Force instrument switch after this many consecutive events "
+                         "on the same instrument (0 = never force)")
+    ap.add_argument("--max_pitch_streak", type=int, default=24,
+                    help="Temporarily exclude a pitch after this many consecutive "
+                         "events on the same pitch (0 = never force)")
+    ap.add_argument("--strict_data_instruments", action="store_true",
+                    help="If data_dir/meta.json has only one instrument, still enforce "
+                         "that filter instead of auto-disabling it")
 
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
@@ -160,13 +191,28 @@ def main():
 
     # Instrument filter from training data ------------------------------------
     include_inst = None
+    meta_instruments = None
+    inst_to_program = None
+    inst_is_drum = None
     if args.data_dir:
         meta_path = Path(args.data_dir) / "meta.json"
         if meta_path.exists():
             meta = json.loads(meta_path.read_text())
-            include_inst = meta.get("instruments")
-            if include_inst:
+            meta_instruments = meta.get("instruments")
+            if meta.get("inst_to_program"):
+                inst_to_program = {int(k): int(v) for k, v in meta["inst_to_program"].items()}
+            if meta.get("inst_is_drum"):
+                inst_is_drum = {int(k): bool(v) for k, v in meta["inst_is_drum"].items()}
+            if meta_instruments:
+                include_inst = list(meta_instruments)
                 print(f"Instruments ({len(include_inst)}): {include_inst}")
+                if len(include_inst) == 1 and not args.strict_data_instruments:
+                    print(
+                        "Warning: meta.json contains only one instrument. "
+                        "Disabling include_inst filter to avoid forced single-instrument output. "
+                        "Use --strict_data_instruments to keep the filter."
+                    )
+                    include_inst = None
             else:
                 print("meta.json missing 'instruments' — re-run noto-convert to add it")
         else:
@@ -185,13 +231,48 @@ def main():
     print(f"Generating {args.n_events} events …  "
           f"pitch_temp={args.pitch_temp}  rhythm_temp={args.rhythm_temp}")
     events = []
+    inst_hist = Counter()
+    pitch_hist_by_inst: dict[int, Counter] = {}
+    streak_inst  = None   # which instrument is currently on a streak
+    streak_count = 0      # how many consecutive events it's had
+    pitch_streak_pitch = None
+    pitch_streak_count = 0
+
     with torch.no_grad():
         for i in range(args.n_events):
             try:
+                # If one instrument has monopolised too many events, exclude it
+                # for this one query so the model is forced to switch.
+                # We don't touch what gets fed back, so hidden state stays clean.
+                exclude = []
+                if (args.max_inst_streak > 0
+                        and streak_count >= args.max_inst_streak
+                        and streak_inst is not None):
+                    exclude = [streak_inst]
+
+                # If include_inst is active, also prune excluded instruments
+                # from this one sampling step. This helps even if exclude_inst
+                # handling differs across notochord versions.
+                step_include = include_inst
+                if exclude and include_inst and len(include_inst) > 1:
+                    pruned = [inst_id for inst_id in include_inst if inst_id not in exclude]
+                    if pruned:
+                        step_include = pruned
+
+                step_exclude_pitch = None
+                if (
+                    args.max_pitch_streak > 0
+                    and pitch_streak_count >= args.max_pitch_streak
+                    and pitch_streak_pitch is not None
+                ):
+                    step_exclude_pitch = [pitch_streak_pitch]
+
                 ev = model.query(
                     min_time=args.min_time,
                     max_time=args.max_time,
-                    include_inst=include_inst,
+                    include_inst=step_include,
+                    exclude_inst=exclude if exclude else None,
+                    exclude_pitch=step_exclude_pitch,
                     pitch_temp=args.pitch_temp,
                     rhythm_temp=args.rhythm_temp,
                     timing_temp=args.rhythm_temp,
@@ -204,6 +285,21 @@ def main():
                 dt    = float(ev.get("time", 0.1))
                 vel   = float(ev.get("vel", ev.get("velocity", 64)))
 
+                # Update streak tracking
+                if inst == streak_inst:
+                    streak_count += 1
+                else:
+                    streak_inst  = inst
+                    streak_count = 1
+                inst_hist[inst] += 1
+                pitch_hist_by_inst.setdefault(inst, Counter())[pitch] += 1
+
+                if pitch == pitch_streak_pitch:
+                    pitch_streak_count += 1
+                else:
+                    pitch_streak_pitch = pitch
+                    pitch_streak_count = 1
+
                 events.append({"instrument": inst, "pitch": pitch,
                                 "time": dt, "velocity": vel})
                 model.feed(inst=inst, pitch=pitch, time=dt, vel=vel)
@@ -213,9 +309,33 @@ def main():
                 break
 
     print(f"Generated {len(events)} events")
+    if inst_hist:
+        top = sorted(inst_hist.items(), key=lambda kv: kv[1], reverse=True)
+        print(f"Instrument usage: {top}")
+        for inst_id, _ in top[:8]:
+            ctr = pitch_hist_by_inst.get(inst_id, Counter())
+            if ctr:
+                print(
+                    f"  inst {inst_id}: unique_pitches={len(ctr)} "
+                    f"top={ctr.most_common(6)}"
+                )
+        if len(top) == 1:
+            only_inst, count = top[0]
+            print(
+                "Warning: generation produced a single instrument "
+                f"({only_inst}) for all {count} events."
+            )
+            if meta_instruments and len(meta_instruments) > 1:
+                print(
+                    "meta.json has multiple instruments, so this likely indicates "
+                    "model collapse during fine-tuning. Try fewer epochs/lower lr."
+                )
+
     events_to_midi(events, Path(args.out_midi),
                    max_note_dur=args.max_note_dur,
-                   max_polyphony=args.max_polyphony)
+                   max_polyphony=args.max_polyphony,
+                   inst_to_program=inst_to_program,
+                   inst_is_drum=inst_is_drum)
 
 
 if __name__ == "__main__":

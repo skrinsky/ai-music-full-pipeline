@@ -24,6 +24,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Dict, Iterable, List
 
 import numpy as np
 import torch
@@ -71,6 +72,56 @@ def evaluate(model, loader, device):
     return total / max(n, 1)
 
 
+def parse_prefixes(raw: str) -> List[str]:
+    return [p.strip() for p in (raw or "").split(",") if p.strip()]
+
+
+def _matches_prefix(name: str, prefixes: Iterable[str]) -> bool:
+    for pfx in prefixes:
+        if name == pfx or name.startswith(pfx + "."):
+            return True
+    return False
+
+
+def set_trainable_by_prefix(model: torch.nn.Module, prefixes: List[str]) -> Dict[str, int]:
+    total = 0
+    trainable = 0
+    for n, p in model.named_parameters():
+        total += p.numel()
+        keep = _matches_prefix(n, prefixes)
+        p.requires_grad_(keep)
+        if keep:
+            trainable += p.numel()
+    return {"total": total, "trainable": trainable}
+
+
+def build_anchor_reference(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
+    ref: Dict[str, torch.Tensor] = {}
+    for n, p in model.named_parameters():
+        if p.requires_grad:
+            ref[n] = p.detach().cpu().clone()
+    return ref
+
+
+def compute_anchor_penalty(model: torch.nn.Module, ref: Dict[str, torch.Tensor]) -> torch.Tensor:
+    if not ref:
+        first_param = next(model.parameters())
+        return first_param.new_zeros(())
+
+    total = None
+    count = 0
+    for n, p in model.named_parameters():
+        if p.requires_grad and n in ref:
+            r = ref[n].to(device=p.device, dtype=p.dtype, non_blocking=True)
+            term = torch.mean((p - r) ** 2)
+            total = term if total is None else (total + term)
+            count += 1
+    if total is None or count == 0:
+        first_param = next(model.parameters())
+        return first_param.new_zeros(())
+    return total / float(count)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True,
@@ -84,6 +135,13 @@ def main():
     ap.add_argument("--lr",         type=float, default=1e-5,
                     help="Fine-tuning LR (pre-training used 1e-4, keep lower here)")
     ap.add_argument("--grad_clip",  type=float, default=1.0)
+    ap.add_argument("--freeze_backbone", action="store_true",
+                    help="Freeze most of the model and train only selected output modules")
+    ap.add_argument("--trainable_prefixes",
+                    default="h_proj,projections,end_proj,time_dist,vel_dist",
+                    help="Comma-separated parameter/module prefixes to train when --freeze_backbone is set")
+    ap.add_argument("--anchor_lambda", type=float, default=0.0,
+                    help="L2 anchor penalty strength to keep trainable params near initialization")
     ap.add_argument("--device",     default="auto")
     args = ap.parse_args()
 
@@ -105,13 +163,39 @@ def main():
     model = Notochord.from_checkpoint(args.checkpoint)
     model = model.to(device)
 
+    if args.freeze_backbone:
+        prefixes = parse_prefixes(args.trainable_prefixes)
+        if not prefixes:
+            raise ValueError("--freeze_backbone set but --trainable_prefixes is empty")
+        counts = set_trainable_by_prefix(model, prefixes)
+        pct = 100.0 * counts["trainable"] / max(1, counts["total"])
+        print(
+            "Freeze-backbone mode enabled. "
+            f"Trainable params: {counts['trainable']:,}/{counts['total']:,} ({pct:.2f}%)"
+        )
+        print(f"Trainable prefixes: {prefixes}")
+    else:
+        for _, p in model.named_parameters():
+            p.requires_grad_(True)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"Full fine-tune mode. Trainable params: {total:,}/{total:,} (100.00%)")
+
+    anchor_ref = build_anchor_reference(model) if args.anchor_lambda > 0 else {}
+    if args.anchor_lambda > 0:
+        print(f"Anchor regularization enabled: lambda={args.anchor_lambda}")
+    else:
+        print("Anchor regularization disabled.")
+
     train_ds = NotoDataset(data_dir, "train")
     val_ds   = NotoDataset(data_dir, "val")
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  drop_last=True)
     val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, drop_last=False)
     print(f"Train batches: {len(train_dl)}  Val batches: {len(val_dl)}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    if not trainable_params:
+        raise RuntimeError("No trainable parameters selected. Check --trainable_prefixes.")
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
 
     best_val = float("inf")
     out_path = Path(args.out)
@@ -119,22 +203,30 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         model.train()
-        train_loss, t0 = 0.0, time.time()
+        train_loss, train_task_loss, train_anchor_loss = 0.0, 0.0, 0.0
+        t0 = time.time()
         for insts, pitches, times, vels, ends in train_dl:
             optimizer.zero_grad()
             out = model(insts.to(device), pitches.to(device),
                         times.to(device), vels.to(device), ends.to(device))
-            loss = compute_loss(out)
+            task_loss = compute_loss(out)
+            anchor_loss = compute_anchor_penalty(model, anchor_ref) if args.anchor_lambda > 0 else task_loss.new_zeros(())
+            loss = task_loss + (args.anchor_lambda * anchor_loss)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
             train_loss += loss.item()
+            train_task_loss += task_loss.item()
+            train_anchor_loss += anchor_loss.item()
 
         avg_train = train_loss / len(train_dl)
+        avg_task  = train_task_loss / len(train_dl)
+        avg_anchor = train_anchor_loss / len(train_dl)
         avg_val   = evaluate(model, val_dl, device)
         elapsed   = time.time() - t0
         print(f"Epoch {epoch:3d}/{args.epochs}  "
-              f"train={avg_train:.4f}  val={avg_val:.4f}  ({elapsed:.0f}s)")
+              f"train={avg_train:.4f}  task={avg_task:.4f}  "
+              f"anchor={avg_anchor:.6f}  val={avg_val:.4f}  ({elapsed:.0f}s)")
 
         if avg_val < best_val:
             best_val = avg_val
