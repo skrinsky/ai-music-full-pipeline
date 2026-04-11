@@ -306,10 +306,10 @@ ft-train: $(FT_DATA_DIR)/train_ids.npy ## LoRA-finetune from pre-trained music m
 
 ft-generate fg: $(FT_ADAPTER)/best ## Generate MIDI from finetuned model
 	$(PYTHON) finetune/generate.py \
-	  --base_model       $(BASE_MODEL) \
-	  --adapter          $(FT_ADAPTER)/best \
-	  --tokenizer_config $(FT_DATA_DIR)/tokenizer_config.json \
-	  --out_midi         $(FT_GENERATED)/out.mid \
+	  --base_model $(BASE_MODEL) \
+	  --adapter    $(FT_ADAPTER)/best \
+	  --data_dir   $(FT_DATA_DIR) \
+	  --out_midi   $(FT_GENERATED)/out.mid \
 	  --device auto $(ARGS)
 	@echo "Output: $(FT_GENERATED)/out.mid"
 
