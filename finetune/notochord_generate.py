@@ -156,7 +156,7 @@ def main():
                 ev = model.query(
                     max_time=args.max_time,
                     # Constrain to rock instruments (remove to allow any instrument)
-                    include_instruments=list(ROCK_PROGRAMS),
+                    include_inst=list(ROCK_PROGRAMS),
                 )
                 # query() returns a dict with instrument, pitch, time, vel
                 events.append({
