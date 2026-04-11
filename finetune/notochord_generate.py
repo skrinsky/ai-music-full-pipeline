@@ -26,31 +26,26 @@ import torch
 from notochord import Notochord
 
 
-# GM programs for typical indie rock instruments — constrain generation to these
-ROCK_PROGRAMS = {
-    25,   # Acoustic Guitar (steel)
-    26,   # Acoustic Guitar (nylon)
-    27,   # Electric Guitar (clean)
-    28,   # Electric Guitar (muted)
-    29,   # Overdriven Guitar
-    30,   # Distortion Guitar
-    33,   # Electric Bass (finger)
-    34,   # Electric Bass (pick)
-    0,    # Acoustic Grand Piano
-    4,    # Electric Piano 1
-    80,   # Lead 1 (square) — synth lead
-    81,   # Lead 2 (sawtooth)
-    128,  # Drums (channel 10)
-}
 
-
-def events_to_midi(events: list[dict], out_path: Path):
+def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 4.0):
     """Convert a list of {instrument, pitch, time, velocity} dicts to a MIDI file."""
     pm = pretty_midi.PrettyMIDI()
 
     # Collect note_on / note_off pairs per (instrument, pitch)
     tracks: dict[int, pretty_midi.Instrument] = {}
-    pending: dict[tuple, float] = {}  # (inst, pitch) → note_on absolute time
+    # (inst, pitch) → (note_on absolute time, velocity)
+    pending: dict[tuple, tuple[float, int]] = {}
+
+    def close_note(inst_id, pitch, end_time):
+        key = (inst_id, pitch)
+        if key not in pending:
+            return
+        on_time, on_vel = pending.pop(key)
+        dur = max(end_time - on_time, 0.01)
+        tracks[inst_id].notes.append(pretty_midi.Note(
+            velocity=on_vel, pitch=pitch,
+            start=on_time, end=on_time + dur,
+        ))
 
     abs_time = 0.0
     for ev in events:
@@ -68,26 +63,20 @@ def events_to_midi(events: list[dict], out_path: Path):
 
         key = (inst_id, pitch)
         if vel > 0:
-            pending[key] = abs_time
-        else:
+            # If this pitch is already open, close it first (implicit note-off)
             if key in pending:
-                on_time = pending.pop(key)
-                dur = max(abs_time - on_time, 0.01)
-                # Use the velocity from the note_on (we store it at on_time)
-                note = pretty_midi.Note(
-                    velocity=max(1, min(127, vel if vel > 0 else 64)),
-                    pitch=pitch,
-                    start=on_time,
-                    end=on_time + dur,
-                )
-                tracks[inst_id].notes.append(note)
+                close_note(inst_id, pitch, abs_time)
+            pending[key] = (abs_time, max(1, min(127, vel)))
+        else:
+            close_note(inst_id, pitch, abs_time)
 
-    # Close any notes still open at the end
-    for (inst_id, pitch), on_time in pending.items():
-        note = pretty_midi.Note(
-            velocity=64, pitch=pitch,
-            start=on_time, end=abs_time + 0.5)
-        tracks[inst_id].notes.append(note)
+    # Close any notes still open — cap at max_note_dur so one note doesn't span the piece
+    for (inst_id, pitch), (on_time, on_vel) in list(pending.items()):
+        end_time = min(on_time + max_note_dur, abs_time + 0.25)
+        tracks[inst_id].notes.append(pretty_midi.Note(
+            velocity=on_vel, pitch=pitch,
+            start=on_time, end=end_time,
+        ))
 
     for inst in tracks.values():
         pm.instruments.append(inst)
@@ -113,6 +102,8 @@ def main():
                     help="Sampling temperature for instrument and pitch heads")
     ap.add_argument("--max_time",     type=float, default=2.0,
                     help="Max seconds between events (prevents long silences)")
+    ap.add_argument("--max_note_dur", type=float, default=4.0,
+                    help="Cap note duration (seconds) — prevents stuck open notes")
     ap.add_argument("--device",       default="auto")
     args = ap.parse_args()
 
@@ -155,8 +146,6 @@ def main():
             try:
                 ev = model.query(
                     max_time=args.max_time,
-                    # Constrain to rock instruments (remove to allow any instrument)
-                    include_inst=list(ROCK_PROGRAMS),
                 )
                 # query() returns a dict with instrument, pitch, time, vel
                 events.append({
@@ -177,7 +166,7 @@ def main():
                 break
 
     print(f"Generated {len(events)} events")
-    events_to_midi(events, Path(args.out_midi))
+    events_to_midi(events, Path(args.out_midi), max_note_dur=args.max_note_dur)
 
 
 if __name__ == "__main__":
