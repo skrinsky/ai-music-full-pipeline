@@ -96,11 +96,14 @@ def main():
     print(f"Found {len(midi_files)} MIDI files in {args.midi_dir}")
 
     all_chunks, errors = [], 0
+    seen_instruments: set[int] = set()
     for path in midi_files:
         try:
             events = midi_to_events(path)
             if not events:
                 continue
+            for e in events:
+                seen_instruments.add(e["instrument"])
             chunks = events_to_arrays(events, args.seq_len, args.stride)
             all_chunks.extend(chunks)
         except Exception as exc:
@@ -133,12 +136,16 @@ def main():
     save_split(train_chunks, "train")
     save_split(val_chunks,   "val")
 
+    instruments_sorted = sorted(seen_instruments)
+    print(f"Instruments seen (GM program or 128=drums): {instruments_sorted}")
+
     meta = {
-        "seq_len":  args.seq_len,
-        "stride":   args.stride,
-        "n_train":  len(train_chunks),
-        "n_val":    len(val_chunks),
-        "midi_dir": str(args.midi_dir),
+        "seq_len":     args.seq_len,
+        "stride":      args.stride,
+        "n_train":     len(train_chunks),
+        "n_val":       len(val_chunks),
+        "midi_dir":    str(args.midi_dir),
+        "instruments": instruments_sorted,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 

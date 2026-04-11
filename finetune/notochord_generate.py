@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import pretty_midi
@@ -104,6 +105,9 @@ def main():
                     help="Max seconds between events (prevents long silences)")
     ap.add_argument("--max_note_dur", type=float, default=4.0,
                     help="Cap note duration (seconds) — prevents stuck open notes")
+    ap.add_argument("--data_dir",     default=None,
+                    help="notochord_convert.py output dir — used to read the instrument "
+                         "list so generation stays in-distribution")
     ap.add_argument("--device",       default="auto")
     args = ap.parse_args()
 
@@ -129,6 +133,20 @@ def main():
     model = model.to(device)
     model.eval()
 
+    # Load instrument list from training data so generation stays in-distribution
+    include_inst = None
+    if args.data_dir:
+        meta_path = Path(args.data_dir) / "meta.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+            include_inst = meta.get("instruments")
+            if include_inst:
+                print(f"Constraining to {len(include_inst)} instruments from training: {include_inst}")
+            else:
+                print("meta.json has no 'instruments' key — re-run noto-convert to add it")
+        else:
+            print(f"meta.json not found at {meta_path}")
+
     # Prime from a MIDI file if provided
     model.reset()
     if args.prompt_midi:
@@ -146,6 +164,7 @@ def main():
             try:
                 ev = model.query(
                     max_time=args.max_time,
+                    include_inst=include_inst,  # None = unconstrained
                 )
                 # query() returns a dict with instrument, pitch, time, vel
                 events.append({

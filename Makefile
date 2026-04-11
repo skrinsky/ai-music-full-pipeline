@@ -350,6 +350,7 @@ noto-generate ng: $(NOTO_FT_CKPT) ## Generate MIDI from fine-tuned Notochord
 	$(PYTHON) finetune/notochord_generate.py \
 	  --checkpoint      $(NOTO_FT_CKPT) \
 	  --base_checkpoint $(NOTO_CKPT) \
+	  --data_dir        $(NOTO_DATA) \
 	  --out_midi        $(NOTO_GEN) \
 	  --device auto $(ARGS)
 	@echo "Output: $(NOTO_GEN)"
