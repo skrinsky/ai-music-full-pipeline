@@ -29,13 +29,16 @@ import torch
 from notochord import Notochord
 
 
-def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 2.0):
+def events_to_midi(events: list[dict], out_path: Path,
+                   max_note_dur: float = 2.0, max_polyphony: int = 0):
     """Convert a list of {instrument, pitch, time, velocity} dicts to a MIDI file."""
     pm = pretty_midi.PrettyMIDI()
 
     tracks: dict[int, pretty_midi.Instrument] = {}
     # (inst, pitch) → (note_on absolute time, velocity)
     pending: dict[tuple, tuple[float, int]] = {}
+    # inst → ordered list of open pitches (oldest first)
+    open_by_inst: dict[int, list[int]] = {}
 
     def close_note(inst_id, pitch, end_time):
         key = (inst_id, pitch)
@@ -47,6 +50,8 @@ def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 2.0
             velocity=on_vel, pitch=pitch,
             start=on_time, end=on_time + dur,
         ))
+        if inst_id in open_by_inst and pitch in open_by_inst[inst_id]:
+            open_by_inst[inst_id].remove(pitch)
 
     abs_time = 0.0
     for ev in events:
@@ -64,9 +69,18 @@ def events_to_midi(events: list[dict], out_path: Path, max_note_dur: float = 2.0
 
         key = (inst_id, pitch)
         if vel > 0:
+            # Polyphony cap: close oldest note before opening a new one
+            if max_polyphony > 0:
+                open_now = open_by_inst.get(inst_id, [])
+                while len(open_now) >= max_polyphony:
+                    close_note(inst_id, open_now[0], abs_time)
+                    open_now = open_by_inst.get(inst_id, [])
             if key in pending:
                 close_note(inst_id, pitch, abs_time)
             pending[key] = (abs_time, max(1, vel))
+            open_by_inst.setdefault(inst_id, [])
+            if pitch not in open_by_inst[inst_id]:
+                open_by_inst[inst_id].append(pitch)
         else:
             close_note(inst_id, pitch, abs_time)
 
@@ -103,27 +117,24 @@ def main():
     ap.add_argument("--n_events",        type=int,   default=1000,
                     help="Events to generate (~1000 ≈ 60-90s)")
 
-    # Sampling temperatures — lower = model sticks closer to what it learned,
-    # higher = more random/exploratory.  0.9 was too chaotic for all heads.
-    ap.add_argument("--pitch_temp",      type=float, default=0.7,
-                    help="Pitch temperature (lower = more tonal coherence)")
-    ap.add_argument("--rhythm_temp",     type=float, default=0.8,
-                    help="Rhythm/timing temperature (lower = more regular feel)")
-    ap.add_argument("--velocity_temp",   type=float, default=0.8,
+    ap.add_argument("--pitch_temp",      type=float, default=0.9,
+                    help="Pitch temperature")
+    ap.add_argument("--rhythm_temp",     type=float, default=0.9,
+                    help="Rhythm/timing temperature")
+    ap.add_argument("--velocity_temp",   type=float, default=0.9,
                     help="Velocity temperature")
-    ap.add_argument("--instrument_temp", type=float, default=0.8,
+    ap.add_argument("--instrument_temp", type=float, default=0.9,
                     help="Instrument temperature")
 
-    # Timing bounds — keep events close together so there are no dead silences
-    ap.add_argument("--max_time",        type=float, default=0.5,
+    ap.add_argument("--max_time",        type=float, default=2.0,
                     help="Max seconds between events")
     ap.add_argument("--min_time",        type=float, default=0.03,
                     help="Min seconds between events")
 
     ap.add_argument("--max_note_dur",    type=float, default=2.0,
                     help="Cap note duration (seconds)")
-    ap.add_argument("--max_polyphony",   type=int,   default=4,
-                    help="Max simultaneous notes per instrument (0 = unlimited)")
+    ap.add_argument("--max_polyphony",   type=int,   default=0,
+                    help="Max simultaneous notes per instrument (0 = let model decide)")
 
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
@@ -174,8 +185,6 @@ def main():
     print(f"Generating {args.n_events} events …  "
           f"pitch_temp={args.pitch_temp}  rhythm_temp={args.rhythm_temp}")
     events = []
-    open_notes: dict[int, list[int]] = {}  # inst → list of currently-sounding pitches
-
     with torch.no_grad():
         for i in range(args.n_events):
             try:
@@ -195,23 +204,6 @@ def main():
                 dt    = float(ev.get("time", 0.1))
                 vel   = float(ev.get("vel", ev.get("velocity", 64)))
 
-                # Polyphony cap: if this instrument is already at the limit,
-                # turn the oldest open note off instead of adding another
-                if args.max_polyphony > 0 and vel > 0:
-                    open_now = open_notes.get(inst, [])
-                    if len(open_now) >= args.max_polyphony:
-                        pitch = open_now[0]
-                        vel   = 0.0
-
-                # Track open notes
-                if vel > 0:
-                    open_notes.setdefault(inst, [])
-                    if pitch not in open_notes[inst]:
-                        open_notes[inst].append(pitch)
-                else:
-                    if inst in open_notes and pitch in open_notes[inst]:
-                        open_notes[inst].remove(pitch)
-
                 events.append({"instrument": inst, "pitch": pitch,
                                 "time": dt, "velocity": vel})
                 model.feed(inst=inst, pitch=pitch, time=dt, vel=vel)
@@ -221,7 +213,9 @@ def main():
                 break
 
     print(f"Generated {len(events)} events")
-    events_to_midi(events, Path(args.out_midi), max_note_dur=args.max_note_dur)
+    events_to_midi(events, Path(args.out_midi),
+                   max_note_dur=args.max_note_dur,
+                   max_polyphony=args.max_polyphony)
 
 
 if __name__ == "__main__":
