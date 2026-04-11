@@ -344,6 +344,9 @@ noto-train: $(NOTO_DATA)/meta.json ## Fine-tune Notochord on personal MIDI data
 	  --checkpoint $(NOTO_CKPT) \
 	  --data_dir   $(NOTO_DATA) \
 	  --out        $(NOTO_FT_CKPT) \
+	  --freeze_backbone \
+	  --epochs 20 \
+	  --lr 3e-5 \
 	  --device cpu $(ARGS)
 
 noto-generate ng: $(NOTO_FT_CKPT) ## Generate MIDI from fine-tuned Notochord
