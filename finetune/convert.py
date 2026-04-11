@@ -2,12 +2,9 @@
 """
 MIDI → tokenized sequences for finetuning.
 
-Two-stage pipeline:
-  1. MidiTok REMI: MIDI file → REMI string tokens  (e.g. "Bar_0 Note_On_60 …")
-  2. HF tokenizer: REMI strings → integer IDs in the pre-trained model's 20k vocab
-
-Using the pre-trained model's own tokenizer means no embedding resize is needed
-in finetune.py, so the pre-trained weights transfer cleanly.
+Downloads the pre-trained model's MidiTok tokenizer config from HuggingFace
+and uses it directly.  This ensures our token IDs are in the same 20k vocab
+the model was trained on, so no embedding resize is needed in finetune.py.
 
 Usage:
     python finetune/convert.py \\
@@ -18,6 +15,7 @@ Usage:
 import argparse
 import json
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -25,31 +23,49 @@ import numpy as np
 SEED = 42
 
 
-def get_miditok():
-    """Return the best available MidiTok tokenizer class."""
+def load_pretrained_tokenizer(hf_model: str, out_dir: Path):
+    """
+    Download tokenizer.json from the HF model repo and load it with MidiTok.
+    Saves a copy to out_dir/tokenizer_config.json for generate.py to use.
+    """
+    from huggingface_hub import hf_hub_download
     import miditok
-    for name in ("REMI", "REMIPlus", "MMT"):
+
+    print(f"Downloading tokenizer from {hf_model} …")
+    cache_path = hf_hub_download(hf_model, "tokenizer.json")
+    shutil.copy(cache_path, out_dir / "tokenizer_config.json")
+
+    # Try tokenizer classes in order — the right one is whichever can load the config
+    errors = []
+    for name in ("REMI", "REMIPlus", "MMT", "MIDILike", "TSD"):
         cls = getattr(miditok, name, None)
-        if cls is not None:
-            print(f"MidiTok tokenizer: {name}")
-            return cls
-    raise ImportError("No usable tokenizer in miditok. Run: make ft-install")
+        if cls is None:
+            continue
+        try:
+            tok = cls(params=out_dir / "tokenizer_config.json")
+            print(f"Loaded tokenizer as {name}  vocab_size={len(tok)}")
+            return tok, name
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+
+    raise RuntimeError("Could not load tokenizer with any MidiTok class:\n" +
+                       "\n".join(errors))
 
 
-def midi_to_remi_strings(midi_path: Path, miditok_tok) -> list[str]:
-    """MIDI file → flat list of REMI string tokens (all tracks concatenated)."""
-    result = miditok_tok(midi_path)
+def tokenize_file(midi_path: Path, tokenizer) -> list[int]:
+    """MIDI → flat list of token IDs using the pre-trained tokenizer."""
+    result = tokenizer(midi_path)
     if isinstance(result, list):
-        return [s for seq in result for s in (seq.tokens or [])]
-    return result.tokens or []
+        return [id_ for seq in result for id_ in (seq.ids or [])]
+    return result.ids or []
 
 
 def main():
-    ap = argparse.ArgumentParser(description="MIDI → 20k-vocab token windows for finetuning")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--midi_dir", required=True)
     ap.add_argument("--out_dir",  required=True)
     ap.add_argument("--hf_model", default="NathanFradet/Maestro-REMI-bpe20k",
-                    help="HuggingFace model whose tokenizer to use (must match --base_model in finetune.py)")
+                    help="HuggingFace model to pull tokenizer from (must match --base_model)")
     ap.add_argument("--seq_len",  type=int,   default=1024)
     ap.add_argument("--stride",   type=int,   default=512)
     ap.add_argument("--val_frac", type=float, default=0.15)
@@ -60,19 +76,9 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Stage 1 tokenizer: MidiTok (MIDI → REMI strings)
-    miditok_cls = get_miditok()
-    miditok_tok = miditok_cls()
-    miditok_tok.save_params(out_dir / "tokenizer_config.json")
+    tokenizer, tok_name = load_pretrained_tokenizer(args.hf_model, out_dir)
+    vocab_size = len(tokenizer)
 
-    # Stage 2 tokenizer: HuggingFace (REMI strings → 20k IDs)
-    from transformers import PreTrainedTokenizerFast
-    print(f"Loading HF tokenizer from {args.hf_model} …")
-    hf_tok    = PreTrainedTokenizerFast.from_pretrained(args.hf_model)
-    vocab_size = hf_tok.vocab_size
-    print(f"HF vocab size: {vocab_size}")
-
-    # Tokenize all MIDI files
     midi_files = sorted(Path(args.midi_dir).glob("**/*.mid")) + \
                  sorted(Path(args.midi_dir).glob("**/*.midi"))
     print(f"Found {len(midi_files)} MIDI files in {args.midi_dir}")
@@ -80,13 +86,9 @@ def main():
     all_chunks, errors = [], 0
     for midi_path in midi_files:
         try:
-            remi_strings = midi_to_remi_strings(midi_path, miditok_tok)
-            if not remi_strings:
+            ids = tokenize_file(midi_path, tokenizer)
+            if not ids:
                 continue
-
-            # Encode the whole track as one space-separated string
-            ids = hf_tok.encode(" ".join(remi_strings), add_special_tokens=False)
-
             for start in range(0, max(1, len(ids) - args.seq_len + 1), args.stride):
                 window = ids[start : start + args.seq_len]
                 if len(window) == args.seq_len:
@@ -110,13 +112,14 @@ def main():
     np.save(out_dir / "val_ids.npy",   np.array(val_chunks,   dtype=np.int32))
 
     meta = {
-        "vocab_size":   vocab_size,
-        "seq_len":      args.seq_len,
-        "stride":       args.stride,
-        "n_train":      len(train_chunks),
-        "n_val":        len(val_chunks),
-        "midi_dir":     str(args.midi_dir),
-        "hf_model_id":  args.hf_model,   # generate.py reads this to load the HF tokenizer
+        "vocab_size":    vocab_size,
+        "seq_len":       args.seq_len,
+        "stride":        args.stride,
+        "n_train":       len(train_chunks),
+        "n_val":         len(val_chunks),
+        "midi_dir":      str(args.midi_dir),
+        "hf_model_id":   args.hf_model,
+        "tok_class":     tok_name,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 

@@ -2,10 +2,7 @@
 """
 Generate MIDI from a LoRA-finetuned music transformer.
 
-Two-stage decode mirrors the two-stage encode in convert.py:
-  1. Model generates token IDs in the 20k HF vocab space
-  2. HF tokenizer decodes IDs → REMI string tokens
-  3. MidiTok converts REMI strings → MIDI file
+Decode path mirrors convert.py: generated IDs → MidiTok (with BPE decompression) → MIDI.
 
 Usage:
     python finetune/generate.py \\
@@ -16,10 +13,8 @@ Usage:
 
     # Seed from one of your own tracks:
     python finetune/generate.py \\
-        --base_model NathanFradet/Maestro-REMI-bpe20k \\
-        --adapter    finetune/runs/adapter/best \\
-        --data_dir   finetune/runs/my_data \\
-        --prompt_midi summer_midi/my_song.mid \\
+        ... \\
+        --prompt_midi  summer_midi/my_song.mid \\
         --prompt_tokens 128 \\
         --out_midi finetune/runs/generated/continuation.mid
 """
@@ -32,88 +27,92 @@ from pathlib import Path
 import torch
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def load_hf_tokenizer(model_id: str):
-    from transformers import PreTrainedTokenizerFast
-    print(f"Loading HF tokenizer from {model_id} …")
-    return PreTrainedTokenizerFast.from_pretrained(model_id)
-
-
-def load_miditok(config_path: Path):
-    """Load the MidiTok tokenizer saved by convert.py."""
+def load_tokenizer(data_dir: Path, tok_class: str):
+    """Reload the MidiTok tokenizer saved by convert.py."""
     import miditok
-    for name in ("REMI", "REMIPlus", "MMT"):
-        cls = getattr(miditok, name, None)
-        if cls is not None:
-            return cls(params=config_path)
-    raise ImportError("No usable MidiTok tokenizer found.")
+    cls = getattr(miditok, tok_class, None)
+    if cls is None:
+        # fallback: try in order
+        for name in ("REMI", "REMIPlus", "MMT"):
+            cls = getattr(miditok, name, None)
+            if cls is not None:
+                break
+    if cls is None:
+        raise ImportError("No usable MidiTok tokenizer found.")
+    return cls(params=data_dir / "tokenizer_config.json")
 
 
-def build_prompt(hf_tok, miditok_tok, prompt_midi: str | None,
+def build_prompt(tokenizer, prompt_midi: str | None,
                  prompt_tokens: int, bos_id: int) -> list[int]:
     if not prompt_midi:
         return [bos_id]
-
-    result = miditok_tok(Path(prompt_midi))
-    if isinstance(result, list):
-        remi_strings = [s for seq in result for s in (seq.tokens or [])]
-    else:
-        remi_strings = result.tokens or []
-
-    ids = hf_tok.encode(" ".join(remi_strings), add_special_tokens=False)
+    result = tokenizer(Path(prompt_midi))
+    ids = result.ids if not isinstance(result, list) \
+          else [i for seq in result for i in (seq.ids or [])]
     ids = ids[:prompt_tokens]
     print(f"Prompt: {len(ids)} tokens from {Path(prompt_midi).name}")
     return ids
 
 
-def decode_to_midi(hf_tok, miditok_tok, token_ids: list[int], out_path: Path):
-    """20k IDs → REMI strings → MIDI file."""
+def decode_to_midi(tokenizer, token_ids: list[int], out_path: Path):
+    """Generated IDs → MIDI via MidiTok (handles BPE decompression internally)."""
     from miditok import TokSequence
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Stage 1: HF tokenizer → REMI string tokens
-    text = hf_tok.decode(token_ids, skip_special_tokens=True)
-    remi_strings = [t for t in text.split() if t]
-    print(f"Decoded {len(token_ids)} IDs → {len(remi_strings)} REMI tokens")
+    # MidiTok v2 with BPE: set ids_bpe_encoded=True so it decompresses correctly
+    tok_seq = TokSequence(ids=token_ids, ids_bpe_encoded=True)
 
-    if not remi_strings:
-        print("No REMI tokens decoded — model may need more training.")
+    # Decompress BPE → base tokens if the method exists
+    if hasattr(tokenizer, "decode_bpe"):
+        tokenizer.decode_bpe(tok_seq)
+
+    errors = []
+    # Try 1: TokSequence (v2.x standard)
+    try:
+        midi_out = tokenizer.tokens_to_midi([tok_seq])
+        midi_out.dump(str(out_path))
+        print(f"Saved MIDI → {out_path}")
         return
+    except Exception as exc:
+        errors.append(f"TokSequence: {exc}")
 
-    # Stage 2: MidiTok → MIDI  (try two API variants for version compat)
-    last_exc = None
-    for attempt, arg in [
-        ("TokSequence", [TokSequence(tokens=remi_strings)]),
-        ("list-of-strings", [remi_strings]),
-    ]:
+    # Try 2: list of token strings (some v2 builds)
+    if tok_seq.tokens:
         try:
-            midi_out = miditok_tok.tokens_to_midi(arg)
+            midi_out = tokenizer.tokens_to_midi([tok_seq.tokens])
             midi_out.dump(str(out_path))
             print(f"Saved MIDI → {out_path}")
             return
         except Exception as exc:
-            last_exc = (attempt, exc)
+            errors.append(f"list-of-strings: {exc}")
 
-    print(f"MIDI decode failed ({last_exc[0]}): {last_exc[1]}")
+    # Try 3: rebuild tokens from reverse vocab
+    rev_vocab   = {v: k for k, v in tokenizer.vocab.items()}
+    token_strs  = [rev_vocab[i] for i in token_ids if i in rev_vocab]
+    try:
+        midi_out = tokenizer.tokens_to_midi([token_strs])
+        midi_out.dump(str(out_path))
+        print(f"Saved MIDI → {out_path}")
+        return
+    except Exception as exc:
+        errors.append(f"rev-vocab strings: {exc}")
+
+    import miditok as _mt
+    print(f"MIDI decode failed (miditok {_mt.__version__}):")
+    for e in errors:
+        print(f"  {e}")
     fallback = out_path.with_suffix(".remi.txt")
-    fallback.write_text("\n".join(remi_strings))
-    print(f"REMI tokens saved → {fallback}  (inspect to debug)")
+    fallback.write_text("\n".join(token_strs))
+    print(f"Token strings saved → {fallback}")
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="Generate MIDI from finetuned model")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--base_model", default="NathanFradet/Maestro-REMI-bpe20k")
-    ap.add_argument("--adapter",    required=True, help="LoRA adapter directory")
+    ap.add_argument("--adapter",    required=True)
     ap.add_argument("--data_dir",   required=True,
-                    help="Directory produced by convert.py (contains meta.json + tokenizer_config.json)")
+                    help="Directory from convert.py (contains meta.json + tokenizer_config.json)")
     ap.add_argument("--out_midi",   required=True)
     ap.add_argument("--n_tokens",   type=int,   default=2048)
     ap.add_argument("--temperature", type=float, default=0.9)
@@ -133,18 +132,17 @@ def main():
 
     data_dir = Path(args.data_dir)
     meta     = json.loads((data_dir / "meta.json").read_text())
+    tok_class = meta.get("tok_class", "REMI")
 
-    # Use hf_model_id from meta if present (set by convert.py), else fall back to --base_model
-    hf_model_id = meta.get("hf_model_id", args.base_model)
+    tokenizer = load_tokenizer(data_dir, tok_class)
 
-    hf_tok     = load_hf_tokenizer(hf_model_id)
-    miditok_tok = load_miditok(data_dir / "tokenizer_config.json")
+    bos_id = next((tokenizer.vocab[t] for t in ("BOS_None", "BOS", "<BOS>")
+                   if t in tokenizer.vocab), 1)
+    eos_id = next((tokenizer.vocab[t] for t in ("EOS_None", "EOS", "<EOS>")
+                   if t in tokenizer.vocab), 2)
+    pad_id = next((tokenizer.vocab[t] for t in ("PAD_None", "PAD", "<PAD>")
+                   if t in tokenizer.vocab), 0)
 
-    bos_id = hf_tok.bos_token_id or 1
-    eos_id = hf_tok.eos_token_id or 2
-    pad_id = hf_tok.pad_token_id or 0
-
-    # Load model + LoRA adapter
     from transformers import AutoModelForCausalLM
     from peft import PeftModel
     print(f"Loading base model: {args.base_model}")
@@ -153,19 +151,15 @@ def main():
     model = model.to(device)
     model.eval()
 
-    # Prompt
-    prompt_ids = build_prompt(hf_tok, miditok_tok,
-                               args.prompt_midi, args.prompt_tokens, bos_id)
-    input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+    prompt_ids = build_prompt(tokenizer, args.prompt_midi, args.prompt_tokens, bos_id)
+    input_ids  = torch.tensor([prompt_ids], dtype=torch.long, device=device)
 
-    # Sampling kwargs
     sample_kwargs: dict = {}
     if args.top_p and args.top_p < 1.0:
         sample_kwargs["top_p"] = args.top_p
     if args.top_k and args.top_k > 0:
         sample_kwargs["top_k"] = args.top_k
 
-    # Generate
     print(f"Generating {args.n_tokens} tokens …")
     t0 = time.time()
     with torch.no_grad():
@@ -180,7 +174,7 @@ def main():
         )
     print(f"Generated {out.shape[1]} tokens in {time.time() - t0:.1f}s")
 
-    decode_to_midi(hf_tok, miditok_tok, out[0].tolist(), Path(args.out_midi))
+    decode_to_midi(tokenizer, out[0].tolist(), Path(args.out_midi))
 
 
 if __name__ == "__main__":
