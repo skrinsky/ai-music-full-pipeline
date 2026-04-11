@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg noto-convert noto-train noto-generate ng
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -324,3 +324,36 @@ $(FT_ADAPTER)/best:
 	  --out_dir    $(FT_ADAPTER) \
 	  --base_model $(BASE_MODEL) \
 	  --device auto
+
+# ---------------------------------------------------------------------------
+# Notochord finetuning  (GRU model pre-trained on Lakh MIDI — rock/pop prior)
+# ---------------------------------------------------------------------------
+
+NOTO_CKPT    := finetune/notochord_lakh_50G_deep.pt
+NOTO_DATA    := finetune/runs/noto_data
+NOTO_FT_CKPT := finetune/runs/noto_finetuned.pt
+NOTO_GEN     := finetune/runs/generated/noto_out.mid
+
+noto-convert: ## Convert personal MIDIs to Notochord event sequences
+	$(PYTHON) finetune/notochord_convert.py \
+	  --midi_dir $(FT_MIDI_DIR) \
+	  --out_dir  $(NOTO_DATA) $(ARGS)
+
+noto-train: $(NOTO_DATA)/meta.json ## Fine-tune Notochord on personal MIDI data
+	$(PYTHON) finetune/notochord_finetune.py \
+	  --checkpoint $(NOTO_CKPT) \
+	  --data_dir   $(NOTO_DATA) \
+	  --out        $(NOTO_FT_CKPT) \
+	  --device auto $(ARGS)
+
+noto-generate ng: $(NOTO_FT_CKPT) ## Generate MIDI from fine-tuned Notochord
+	$(PYTHON) finetune/notochord_generate.py \
+	  --checkpoint $(NOTO_FT_CKPT) \
+	  --out_midi   $(NOTO_GEN) \
+	  --device auto $(ARGS)
+	@echo "Output: $(NOTO_GEN)"
+
+$(NOTO_DATA)/meta.json:
+	$(PYTHON) finetune/notochord_convert.py \
+	  --midi_dir $(FT_MIDI_DIR) \
+	  --out_dir  $(NOTO_DATA)
