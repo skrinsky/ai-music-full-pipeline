@@ -771,7 +771,7 @@ def generate(args):
             phase = "TIME"; since_note_tokens += 1
 
         if len(seq) % 200 == 0:
-            print(f"[{len(seq)}/{args.max_tokens}] notes={notes_placed} silent={since_note_tokens} grid={grid_mode}  {time.time()-t0:.1f}s")
+            print(f"[{len(seq)}/{args.max_tokens}] notes={notes_placed} silent={since_note_tokens} grid={'warmup' if not grid_locked else grid_step}  {time.time()-t0:.1f}s")
 
         if notes_placed >= args.min_notes_before_stop and len(seq) >= int(args.max_tokens * 0.6):
             break
