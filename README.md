@@ -1,96 +1,78 @@
 # AI Music Full Pipeline
 
-This repo orchestrates an end-to-end workflow:
+End-to-end music generation:
 
 **Stereo audio → stems/MIDI (submodule) → event preprocessing → training → generation**
 
-The audio→MIDI stage is included as a git submodule under `vendor/all-in-one-ai-midi-pipeline/`.
+The audio→MIDI stage is a git submodule at `vendor/all-in-one-ai-midi-pipeline/`. The rest of the repo has grown into several parallel training pipelines — blues-from-MIDI (GigaMIDI), Bach chorales (JSB), cascade-by-instrument, dense chorale, LoRA finetune, and Notochord finetune — all driven from the top-level `Makefile`.
 
-## Repo layout
-
-
-ai-music-full-pipeline/
-vendor/
-all-in-one-ai-midi-pipeline/ # submodule (audio -> MIDI)
-training/
-pre.py # MIDI -> events (+ optional track filtering)
-train.py # train model
-generate.py # generate MIDI from trained model
-configs/
-scripts/
-run_end_to_end.sh # orchestration script
-README.md
-.gitignore
-
+For the full map of pipelines, entry points, and architecture, see **[CLAUDE.md](CLAUDE.md)**.
 
 ## Clone (with submodule)
 
-If you haven't cloned yet:
-
 ```bash
 git clone --recurse-submodules <THIS_REPO_URL>
-
-
-If you already cloned without submodules:
-
+# or, if already cloned:
 git submodule update --init --recursive
+```
 
-Setup
+## Setup
 
-Create a Python environment and install dependencies (you may want separate envs for pipeline vs training later; start with one env for now):
+```bash
+make setup                         # uv-based venv in .venv-ai-music (Python 3.10)
+source .venv-ai-music/bin/activate
+```
 
-python3.10 -m venv .venv
-source .venv/bin/activate
-pip install -r vendor/all-in-one-ai-midi-pipeline/requirements.txt
-# plus whatever your training scripts require (torch, etc.)
+## Discover what you can run
 
-End-to-end run
+```bash
+make help
+```
 
-Put audio in data/raw/ (ignored by git):
+lists every target with a one-line description. Pass extra flags through with `ARGS=...`, e.g. `make blues-train ARGS="--max_d_model 128"`.
 
-mkdir -p data/raw
-# copy audio into data/raw/
+## Common flows
 
+```bash
+# Blues MIDI pipeline (no audio stage)
+make gigamidi-fetch                # ~1000 GigaMIDI blues MIDIs → data/blues_midi/
+make blues-preprocess
+make blues-train                   # or: make blues-resume
+make bg                            # generate
 
-Run the full pipeline:
+# Bach chorale pipeline
+curl -L -o data/Jsb16thSeparated.npz \
+  https://github.com/omarperacha/TonicNet/raw/master/dataset_unprocessed/Jsb16thSeparated.npz
+make chorale-convert               # NPZ → 305 MIDIs in data/chorales_midi/
+make chorale-preprocess && make chorale-train
+make cg                            # generate
 
-scripts/run_end_to_end.sh
+# Full audio → MIDI → training pipeline
+mkdir -p data/raw && cp /path/to/*.wav data/raw/
+scripts/run_end_to_end.sh                              # all instruments
+scripts/run_end_to_end.sh --tracks drums,bass,guitar   # subset
+scripts/run_end_to_end.sh --device {cuda,mps,cpu}      # device override
 
-Select a subset of tracks
+# Generate from the latest checkpoint in runs/checkpoints/
+make gen
+```
 
-Example: only drums + bass:
+Shortcut aliases: `bg`=blues-generate, `cg`=chorale-generate, `cdg`=chorale-dense-generate, `fg`=ft-generate, `ng`=noto-generate.
 
-scripts/run_end_to_end.sh --tracks drums,bass
+## Device selection
 
+Training/generation defaults to `--device auto`: CUDA if available, else MPS, else CPU. Override with `--device {cuda,mps,cpu}`. Note: Notochord finetuning is pinned to CPU — MPS produces NaN loss on that model.
 
-Example: drums + bass + guitar:
+## Outputs (all git-ignored)
 
-scripts/run_end_to_end.sh --tracks drums,bass,guitar
+- `out_midis/` — MIDIs exported from the audio→MIDI stage
+- `runs/events/`, `runs/blues_events/`, `runs/chorale_events/`, … — preprocessed event datasets
+- `runs/checkpoints/` — trained checkpoints
+- `runs/generated/` — generated MIDI
+- `finetune/runs/` — finetune adapters, data, outputs
 
-Device selection
+## Tests
 
-Training/generation device defaults to auto:
-
-CUDA if available
-
-else Apple MPS if available
-
-else CPU
-
-Override:
-
-scripts/run_end_to_end.sh --device cuda
-scripts/run_end_to_end.sh --device mps
-scripts/run_end_to_end.sh --device cpu
-
-Outputs
-
-Generated / intermediate outputs live in (all ignored by git):
-
-out_midis/ exported MIDIs
-
-runs/events/ preprocessed event datasets
-
-runs/checkpoints/ trained checkpoints
-
-runs/generated/ generated MIDI outputs
+```bash
+pytest tests/
+```

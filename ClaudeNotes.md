@@ -814,4 +814,182 @@ Plan: Chorale key normalization + remove transposition augmentation
   Would you like to explore any of these directions?
   
 -------------------------------------------------------------------------------------------------------------------
+2026-04-17
+
+[/init + advising prep for Summer]
+
+⏺ Orientation and doc cleanup
+
+  - Refreshed CLAUDE.md: the Makefile is the real entry point, with
+    ~8 parallel pipelines (blues, chorale dense, cascade, chorale
+    cascade, LoRA finetune, Notochord finetune, plus the original
+    audio→MIDI). Shortcut aliases: bg, cg, cdg, fg, ng, gen.
+
+  - Rewrote README.md (was stale -- wrong venv path, predated the
+    Makefile) and collapsed AGENTS.md into a one-line pointer to
+    CLAUDE.md so it can't drift again.
+
+  - Saved a project memory noting Summer owns the Notochord work in
+    finetune/notochord_*.py; future sessions will flag her as the
+    domain expert on that pipeline.
+
+⏺ How to learn Notochord fast
+
+  - Best single file to read: finetune/notochord_finetune.py -- the
+    forward signature shows the model's interface in ~60 lines
+    (5 log-prob streams: instrument/pitch/time/velocity/end, loss
+    is summed NLL).
+
+  - git log finetune/notochord_*.py is effectively a gotchas doc:
+    NaN loss on MPS (force CPU), catastrophic forgetting (freeze
+    backbone), 1-indexed Notochord instrument space (not GM),
+    stuck notes, int64 JSON serialization.
+
+  - Upstream: victor-shepardson/notochord. Paper: Shepardson,
+    "Notochord: a real-time neural network for polyphonic MIDI
+    performance" (AIMC 2023). (Title/authors to verify.)
+
+⏺ Assessment of Summer's two fine-tuning approaches
+
+  Notochord (GRU, 5 heads): honest fine-tune candidate -- small
+  enough that gradients do something, native MIDI event rep,
+  real-time. Limits: no long-range, no explicit structural prior.
+
+  LoRA on MMT-GPT2: bigger prior (170k MIDIs) + long-range attn,
+  but r=16 on c_attn is a narrow conditioning channel and has to
+  fight the base distribution.
+
+  Red flag: finetune.py:63-96 _FALLBACK_NOTE silently returns a
+  RANDOM GPT-2 if the HF download fails. Violates "no fallbacks,
+  fail fast" -- should exit 1. If triggered unnoticed, Summer
+  would be "fine-tuning" noise.
+
+  Recommendation: don't pick between them -- use Notochord for
+  real-time/interactive, MMT+LoRA for offline/long-form. Partial
+  unfreeze of late Notochord layers worth trying (style features
+  live in late layers if anywhere).
+
+⏺ The latent-space question (JOS's instinct was right)
+
+  A model trained on heterogeneous MIDI has an entangled latent
+  space -- no clean "Summer-ness axis." Fine-tuning nudges an
+  output distribution; it does not discover a semantic dimension.
+
+  The sharpened empirical question: does Summer's data sit INSIDE
+  the Lakh manifold or OUTSIDE?
+    - Inside -> LoRA can work; she's re-weighting, not relocating.
+    - Outside -> no small-data fine-tune will get there without
+      collapsing structure.
+
+  Answerable empirically. Worth doing before more training runs.
+
+⏺ Alternatives to fine-tuning worth trying first
+
+  1. Prompting / seeding -- seed generation with 4-16 bars of her
+     own MIDI. Biggest win for zero effort and zero forgetting risk.
+  2. Musical augmentation -- transpose to all 12 keys is an
+     instant 12x data boost. Tempo +-10%, velocity jitter.
+  3. Classifier-free guidance with a style token -- much more
+     sample-efficient than whole-model fine-tuning.
+  4. Explicit structural conditioning -- extract her chord
+     progressions, use as inference-time constraints. Separates
+     harmonic language (explicit) from voice leading (model).
+  5. Tiny model from scratch on augmented data -- counter-intuitive
+     but worth one experiment; no competing prior to fight.
+  6. Hybrid: symbolic model generates MIDI -> synthesize ->
+     RAVE decoder fine-tuned on her sonic palette -> audio.
+
+⏺ RAVE and what its "small-data miracle" actually is
+
+  RAVE = VAE for raw audio. PQMF front-end (16-band perfect-
+  reconstruction filterbank -- JOS will recognize this; it's the
+  key efficiency trick) + strided-conv encoder + conv decoder
+  with noise injection. Two-stage training: stage 1 is VAE
+  (reconstruction + KL), stage 2 freezes encoder and adversarially
+  fine-tunes only the decoder. Avoids GAN instability.
+
+  v2: Snake activation, better noise synth, VQ latent variant,
+  CachedConv for causal streaming, nn~ Max/PD integration.
+
+  The "30-min-of-audio fine-tune works!" reputation is real but
+  misleading: 30 min at 48 kHz = 86M samples, vs ~10^5 MIDI tokens
+  in Summer's corpus. Three orders of magnitude more supervision
+  per minute. Reconstruction is also a dense, unambiguous
+  objective; "what note comes next" is not.
+
+  Lesson (worth stating in the advising meeting):
+    "When data is scarce, choose a model whose objective is
+     tightly coupled to a dense, unambiguous signal in that data."
+
+⏺ GANs on MIDI -- why the field moved on
+
+  MuseGAN, MidiNet, C-RNN-GAN, SeqGAN, etc. -- tried hard, lost
+  out. Three structural problems:
+    1. Discrete tokens break gradient flow (Gumbel-Softmax /
+       REINFORCE / piano-roll -- all hurt).
+    2. Mode collapse is lethal in music -- repetitive 4-bar loops.
+    3. No long-range coherence.
+
+  Adversarial ideas that DO work in music: audio vocoders
+  (MelGAN/HiFiGAN/BigVGAN) and RAVE-style stage-2 perceptual loss.
+  For Summer: skip GAN-as-generator. One tractable idea: a small
+  discriminator "sounds like Summer vs generic Lakh" as a light
+  auxiliary reward on top of LoRA. More RLHF than classical GAN.
+
+⏺ Probing the freeze-boundary representation (JOS's key question)
+
+  The layer-N hidden state is the entire interface the fine-tune
+  can see. If a feature isn't there, no adapter can conjure it.
+
+  Toolbox:
+    - Linear probes (Alain & Bengio; Conneau et al). Always run
+      against label-shuffled control (Hewitt & Liang 2019).
+    - MDL probing (Voita & Titov 2020) -- controls for probe
+      capacity automatically.
+    - Structural probes (Hewitt & Manning 2019) for hierarchy.
+    - CKA (Kornblith et al 2019) -- compares representation
+      geometry; directly tells you whether the model already
+      treats Summer's MIDI as distinct from Lakh.
+    - UMAP/t-SNE on activations colored by source -- fastest
+      first-look.
+    - Logit / tuned lens -- watch predictions sharpen layer by
+      layer.
+    - Sparse autoencoders -- most fine-grained, heaviest to run.
+    - Activation patching -- causal evidence, overkill for first pass.
+
+  Concrete recipe for Summer (~1 week, high value):
+    1. Extract hidden states at every layer for her MIDIs and a
+       matched Lakh subset.
+    2. Auto-label both (music21/pretty_midi/madmom) for key,
+       tempo, chord, density, meter.
+    3. Per layer: probe accuracy (vs shuffled control), CKA,
+       UMAP scatter.
+    4. Decide the freeze boundary: put LoRA where style-relevant
+       features are maximally decodable AND her distribution is
+       most distinct. Currently her LoRA targets c_attn on every
+       layer uniformly -- adaptation capacity spread thin.
+    5. Re-probe after fine-tuning. If "Summer-ness" probe
+       improves, the LoRA did something structural. If not, the
+       fine-tune is cosmetic.
+
+⏺ Publishable angle
+
+  "What do pretrained music transformers actually represent, and
+  where?" The music-ML community mostly runs fine-tunes and
+  reports sample quality. A probing-first methodology paper --
+  layer-wise probes for standard MIR properties + CKA geometry +
+  validation that probe outcomes predict fine-tune success --
+  would be genuinely novel. This reframes Summer's practical
+  problem as a research contribution.
+
+⏺ Outputs from this session
+
+  - CLAUDE.md rewritten, README.md refreshed, AGENTS.md pointer.
+  - RepresentationResearch.md (~270 lines) consolidating the
+    Summer-advising discussion with a full references section
+    (arxiv links for linear probes, MDL, structural probes, CKA,
+    logit/tuned lens, SAEs, RAVE, the MIDI-GAN line of work,
+    LoRA, CFG, MIR tooling).
+  - Project memory: Summer owns the Notochord pipeline.
+
 -------------------------------------------------------------------------------------------------------------------
