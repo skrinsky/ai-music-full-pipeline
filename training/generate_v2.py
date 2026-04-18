@@ -172,19 +172,15 @@ def get_args():
     ap.add_argument("--entropy_ceiling", type=float, default=0.0,
                     help="If PITCH entropy exceeds this, skip the note and force a TIME_SHIFT instead. 0=disabled. Try 3.5.")
 
-    # ===== Grid snapping controls (NEW) =====
+    # ===== Grid snapping controls =====
     ap.add_argument("--snap_time_shift", action="store_true", default=True,
-                    help="Snap TIME_SHIFT deltas to a rhythmic grid (straight vs triplet).")
+                    help="Snap TIME_SHIFT deltas to a rhythmic grid (auto-detected pulse).")
     ap.add_argument("--grid_straight_steps", type=int, default=6,
-                    help="Grid step (in 1/24-qn steps) for straight feel. 6=1/16 note.")
-    ap.add_argument("--grid_triplet_steps", type=int, default=8,
-                    help="Grid step (in 1/24-qn steps) for triplet feel. 8=1/8-triplet.")
+                    help="Fallback grid step if pulse detection hasn't fired yet. 6=1/16 note.")
     ap.add_argument("--grid_detect_window", type=int, default=24,
-                    help="How many recent TIME_SHIFT deltas to use to infer grid mode.")
+                    help="How many TIME_SHIFT deltas to collect before locking pulse, and window for re-detection.")
     ap.add_argument("--grid_lock_tokens", type=int, default=96,
-                    help="Minimum tokens to wait before allowing grid mode to flip.")
-    ap.add_argument("--grid_margin", type=float, default=0.15,
-                    help="How much better (relative) triplet must fit to switch (smaller = switches more).")
+                    help="Minimum tokens between pulse re-detection checks.")
 
     ap.add_argument("--seed", type=int, default=None)
 
@@ -619,9 +615,13 @@ def generate(args):
     # ===== Adaptive grid state =====
     time_shift_size = layout.get("TIME_SHIFT", {}).get("size", None)
     max_delta_steps = int(time_shift_size) if time_shift_size is not None else 192
-    grid_mode = "straight"
+    # Candidate pulse steps in 1/24-QN units: 3=1/32, 4=1/16-triplet, 6=1/16, 8=1/8-triplet, 12=1/8, 16=1/4-triplet, 24=1/4
+    GRID_CANDIDATES = [3, 4, 6, 8, 12, 16, 24]
+    grid_step = args.grid_straight_steps   # will be overridden after warmup
+    grid_locked = False                    # False during warmup, True once pulse is chosen
     grid_last_flip_at = 0
     recent_deltas = deque(maxlen=args.grid_detect_window)
+    warmup_deltas = []                     # raw deltas collected before pulse is locked
 
     t0 = time.time()
     while len(seq) < args.max_tokens:
@@ -712,24 +712,39 @@ def generate(args):
         if args.snap_time_shift and type_name == "TIME_SHIFT":
             raw_delta = int(val_local) + 1
 
-            # update mode decision based on fit to straight vs triplet
-            recent_deltas.append(raw_delta)
-            if (len(seq) - grid_last_flip_at) >= args.grid_lock_tokens and len(recent_deltas) >= max(8, args.grid_detect_window // 2):
-                err_straight = sum(fit_error(d, args.grid_straight_steps) for d in recent_deltas) / float(len(recent_deltas))
-                err_triplet  = sum(fit_error(d, args.grid_triplet_steps)  for d in recent_deltas) / float(len(recent_deltas))
+            if not grid_locked:
+                # Warmup: collect unsnapped deltas to detect the model's natural pulse
+                warmup_deltas.append(raw_delta)
+                if len(warmup_deltas) >= args.grid_detect_window:
+                    # Find candidate step that minimizes mean rounding error
+                    best_step, best_err = args.grid_straight_steps, float("inf")
+                    for cand in GRID_CANDIDATES:
+                        err = sum(fit_error(d, cand) for d in warmup_deltas) / len(warmup_deltas)
+                        if err < best_err:
+                            best_err, best_step = err, cand
+                    grid_step = best_step
+                    grid_locked = True
+                    print(f"[grid] pulse detected: step={grid_step} (1/{int(round(96/grid_step))} note)  err={best_err:.3f}")
+                # During warmup: pass through unsnapped
+                val_local = int(raw_delta - 1)
+            else:
+                # Locked: snap to detected pulse, allow re-detection periodically
+                recent_deltas.append(raw_delta)
+                if ((len(seq) - grid_last_flip_at) >= args.grid_lock_tokens
+                        and len(recent_deltas) >= max(8, args.grid_detect_window // 2)):
+                    best_step, best_err = grid_step, float("inf")
+                    for cand in GRID_CANDIDATES:
+                        err = sum(fit_error(d, cand) for d in recent_deltas) / len(recent_deltas)
+                        if err < best_err:
+                            best_err, best_step = err, cand
+                    if best_step != grid_step:
+                        print(f"[grid] pulse shift: {grid_step}→{best_step} (1/{int(round(96/best_step))} note)  err={best_err:.3f}")
+                        grid_step = best_step
+                        grid_last_flip_at = len(seq)
 
-                # Switch only if meaningfully better
-                if grid_mode == "straight" and (err_triplet + args.grid_margin) < err_straight:
-                    grid_mode = "triplet"
-                    grid_last_flip_at = len(seq)
-                elif grid_mode == "triplet" and (err_straight + args.grid_margin) < err_triplet:
-                    grid_mode = "straight"
-                    grid_last_flip_at = len(seq)
-
-            snapped_delta = snap_delta(raw_delta, grid_mode,
-                                       args.grid_straight_steps, args.grid_triplet_steps,
-                                       max_delta_steps)
-            val_local = int(snapped_delta - 1)  # back to local index
+                snapped = nearest_multiple(raw_delta, grid_step)
+                snapped = max(1, min(int(snapped), int(max_delta_steps)))
+                val_local = int(snapped - 1)
 
         global_id = starts[type_name] + int(val_local)
         seq.append(global_id)
@@ -812,12 +827,10 @@ def generate(args):
         "temperature": args.temperature,
         "top_p": args.top_p,
         "ctx": args.ctx,
-        "grid_mode_final": grid_mode,
-        "grid_straight_steps": args.grid_straight_steps,
-        "grid_triplet_steps": args.grid_triplet_steps,
+        "grid_step_detected": grid_step,
+        "grid_locked": grid_locked,
         "grid_detect_window": args.grid_detect_window,
         "grid_lock_tokens": args.grid_lock_tokens,
-        "grid_margin": args.grid_margin,
         "device": device,
         "out_midi": args.out_midi,
         "sequence_len": len(seq),
