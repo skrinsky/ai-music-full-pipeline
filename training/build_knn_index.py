@@ -157,17 +157,19 @@ def main():
     with open(args.train_pkl, "rb") as f:
         train_data = pickle.load(f)
 
-    # train_data is a list of dicts with key "tokens" (or may be a list of lists)
-    if isinstance(train_data, list) and len(train_data) > 0:
-        if isinstance(train_data[0], dict):
-            seqs = [item["tokens"] for item in train_data if "tokens" in item]
+    # pre.py saves {"sequences": [...], "aux": [...]}
+    if isinstance(train_data, dict) and "sequences" in train_data:
+        seqs = [list(s) for s in train_data["sequences"]]
+    elif isinstance(train_data, list) and len(train_data) > 0:
+        if isinstance(train_data[0], dict) and "tokens" in train_data[0]:
+            seqs = [list(item["tokens"]) for item in train_data]
         elif isinstance(train_data[0], (list, np.ndarray)):
             seqs = [list(s) for s in train_data]
         else:
             print("ERROR: unrecognized training data format.")
             sys.exit(1)
     else:
-        print("ERROR: training data is empty or unrecognized format.")
+        print(f"ERROR: unrecognized training data format. Got type={type(train_data)}")
         sys.exit(1)
 
     print(f"Total training sequences: {len(seqs)}")
