@@ -1172,7 +1172,7 @@ def is_track_bluesy(ev, tempo_bpm: float, min_scale_score: float = 0.60, min_swi
 
 # -------------- MAIN PIPELINE --------------
 def main():
-    global MIDI_FOLDER, DATA_FOLDER, SAMPLES_DIR, AUG_ENABLE
+    global MIDI_FOLDER, DATA_FOLDER, SAMPLES_DIR, AUG_ENABLE, SEQ_LEN, SEQ_STRIDE
     ap = argparse.ArgumentParser("preES4: preprocess multitrack MIDI into factored event-stream windows.")
     ap.add_argument("--midi_folder", default=MIDI_FOLDER, help="Folder containing per-song multi-track MIDI files.")
     ap.add_argument("--data_folder", default=DATA_FOLDER, help="Output folder for events_train/val + vocab.")
@@ -1205,7 +1205,6 @@ def main():
     MIDI_FOLDER = args.midi_folder
     DATA_FOLDER = args.data_folder
     AUG_ENABLE = False if args.no_aug else True
-    global SEQ_LEN, SEQ_STRIDE
     SEQ_LEN    = args.seq_len
     SEQ_STRIDE = args.seq_stride if args.seq_stride is not None else SEQ_LEN // 2
     print(f"Window: seq_len={SEQ_LEN}, stride={SEQ_STRIDE}")
