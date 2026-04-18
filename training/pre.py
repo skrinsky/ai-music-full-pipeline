@@ -1183,6 +1183,10 @@ def main():
     ap.add_argument("--instrument_set", default="blues6", choices=list(INSTRUMENT_PRESETS.keys()),
                     help="Preset instrument configuration (default: blues6).")
     ap.add_argument("--instruments", default="", help="Arbitrary comma-separated instrument names (overrides --instrument_set). E.g.: soprano,alto,tenor,bassvox")
+    ap.add_argument("--seq_len", type=int, default=SEQ_LEN,
+                    help=f"Token window length (default {SEQ_LEN}). Use 1024 for longer context training.")
+    ap.add_argument("--seq_stride", type=int, default=None,
+                    help="Window stride (default: seq_len // 2).")
     args = ap.parse_args()
 
     if args.diagnose_drums:
@@ -1201,6 +1205,10 @@ def main():
     MIDI_FOLDER = args.midi_folder
     DATA_FOLDER = args.data_folder
     AUG_ENABLE = False if args.no_aug else True
+    global SEQ_LEN, SEQ_STRIDE
+    SEQ_LEN    = args.seq_len
+    SEQ_STRIDE = args.seq_stride if args.seq_stride is not None else SEQ_LEN // 2
+    print(f"Window: seq_len={SEQ_LEN}, stride={SEQ_STRIDE}")
 
     os.makedirs(DATA_FOLDER, exist_ok=True)
     SAMPLES_DIR = os.path.join(DATA_FOLDER, "_samples")
