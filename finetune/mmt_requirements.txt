@@ -1,0 +1,9 @@
+# MMT fine-tuning dependencies — install into the existing .venv-ai-music:
+#   pip install -r finetune/mmt_requirements.txt
+#
+# x-transformers must be pinned exactly — MMT's model code uses the 0.25.x API.
+# muspy is the symbolic music toolkit that MMT uses for MIDI I/O.
+x-transformers==0.25.9
+muspy
+einops
+pretty_midi

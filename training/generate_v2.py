@@ -189,8 +189,14 @@ def get_args():
     ap.add_argument("--seed", type=int, default=None)
 
     # ===== MIDI seed (prompt) =====
-    ap.add_argument("--seed_midi", default="", help="Path to a MIDI file to use as the opening prompt. The file is tokenized and prepended to the generation sequence.")
+    ap.add_argument("--seed_midi", default="", help="Path to a MIDI file to use as the opening prompt. The seed is fed as context but NOT written to the output MIDI.")
     ap.add_argument("--seed_bars", type=int, default=0, help="Limit seed MIDI to the first N bars (0 = use entire file).")
+
+    # ===== KNN-LM guidance =====
+    ap.add_argument("--knn_index", default="", help="Path prefix for FAISS index built by build_knn_index.py (loads <prefix>.faiss + <prefix>.npz). Empty = disabled.")
+    ap.add_argument("--knn_k", type=int, default=16, help="Number of nearest neighbors for KNN-LM. Try 8-32.")
+    ap.add_argument("--knn_lambda", type=float, default=0.3, help="KNN interpolation weight (0=model only, 1=KNN only). Try 0.2-0.4.")
+
     return ap.parse_args()
 
 # =================== Model ===================
@@ -229,7 +235,7 @@ class FactorizedESModel(nn.Module):
         self.type_head   = nn.Linear(d_model, self.num_types, bias=True)
         self.value_heads = nn.ModuleList([nn.Linear(d_model, s, bias=True) for s in head_sizes])
 
-    def forward(self, x):
+    def forward(self, x, return_hidden=False):
         B, T = x.shape
         h = self.drop(self.pos_emb(self.tok_emb(x)))
         mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), diagonal=1)
@@ -237,6 +243,8 @@ class FactorizedESModel(nn.Module):
         h = self.tr(h, mask=mask, src_key_padding_mask=pad)
         type_logits  = self.type_head(h)
         value_logits = [head(h) for head in self.value_heads]
+        if return_hidden:
+            return type_logits, value_logits, h[:, -1, :].detach()
         return type_logits, value_logits
 
 # =================== Utils ===================
@@ -477,6 +485,29 @@ def generate(args):
     if missing:
         print("[warn] Missing keys when loading checkpoint:", missing[:20], ("..." if len(missing) > 20 else ""))
 
+    # ===== KNN-LM index =====
+    knn_index = None
+    knn_next_tokens = None
+    knn_pitch_type = None
+    if args.knn_index:
+        try:
+            import faiss as _faiss
+            import numpy as _np
+            _fi = args.knn_index.rstrip("/")
+            _faiss_path = _fi if _fi.endswith(".faiss") else _fi + ".faiss"
+            _meta_path  = (_fi[:-6] if _fi.endswith(".faiss") else _fi) + ".npz"
+            knn_index = _faiss.read_index(_faiss_path)
+            _meta = _np.load(_meta_path)
+            knn_next_tokens = _meta["next_tokens"]
+            knn_pitch_type  = str(_meta["pitch_type"]) if "pitch_type" in _meta else "PITCH_GENERAL"
+            print(f"KNN index: {knn_index.ntotal} vectors, pitch_type={knn_pitch_type}, k={args.knn_k}, lambda={args.knn_lambda}")
+        except ImportError:
+            print("WARNING: faiss not installed — KNN-LM disabled. pip install faiss-cpu")
+            knn_index = None
+        except Exception as _e:
+            print(f"WARNING: failed to load KNN index: {_e} — KNN-LM disabled.")
+            knn_index = None
+
     TYPE_IDX = {nm: i for i, nm in enumerate(type_names)}
     def has(name): return name in TYPE_IDX
     def maybe_idx(name): return TYPE_IDX[name] if has(name) else None
@@ -563,6 +594,7 @@ def generate(args):
     if args.seed_midi:
         seed_tokens = tokenize_seed_midi(args.seed_midi, vocab, max_bars=args.seed_bars)
         seq = [BOS_ID] + seed_tokens
+        seed_offset = len(seq)   # generated tokens start here; seed is NOT written to output MIDI
         phase, last_inst = infer_phase_from_tokens(seed_tokens, layout, type_names)
         # count notes already in the seed
         notes_placed = sum(1 for t in seed_tokens if any(
@@ -570,8 +602,10 @@ def generate(args):
             for n in type_names if n.startswith("PITCH")
         ))
         print(f"Seed MIDI: {args.seed_midi} → {len(seed_tokens)} tokens, {notes_placed} notes, resuming at phase={phase}")
+        print("(seed tokens will be used as context only — NOT written to output MIDI)")
     else:
         seq = [BOS_ID]
+        seed_offset = 1
         phase = "TIME"
         last_inst = None
         notes_placed = 0
@@ -592,7 +626,11 @@ def generate(args):
     t0 = time.time()
     while len(seq) < args.max_tokens:
         ctx = torch.tensor(seq[-args.ctx:], dtype=torch.long, device=device).unsqueeze(0)
-        type_logits, value_logits_list = model(ctx)
+        if knn_index is not None:
+            type_logits, value_logits_list, _h_last = model(ctx, return_hidden=True)
+        else:
+            type_logits, value_logits_list = model(ctx)
+            _h_last = None
         tlog = type_logits[:, -1, :].squeeze(0)
 
         allowed = allowed_type_indices_for_phase(phase, last_inst, notes_this_step)
@@ -647,7 +685,28 @@ def generate(args):
                     notes_this_step = 0
                 continue
 
-        val_local = sample_from_logits(v_logits, local_temp, args.top_p)
+        # ===== KNN-LM: interpolate model distribution with nearest-neighbor distribution =====
+        _knn_sampled = False
+        if (knn_index is not None and knn_next_tokens is not None
+                and type_name == knn_pitch_type and _h_last is not None):
+            import numpy as _np
+            _h_vec = _h_last.cpu().float().numpy()
+            _, _I = knn_index.search(_h_vec, args.knn_k)
+            _knn_dist = torch.zeros(v_logits.shape[0], device=device)
+            for _nbr in _I[0]:
+                if 0 <= _nbr < len(knn_next_tokens):
+                    _tok = int(knn_next_tokens[_nbr])
+                    if 0 <= _tok < _knn_dist.shape[0]:
+                        _knn_dist[_tok] += 1.0
+            if _knn_dist.sum() > 0:
+                _knn_dist /= _knn_dist.sum()
+                _model_probs = torch.softmax(v_logits / max(1e-6, local_temp), dim=-1)
+                _mixed = (1.0 - args.knn_lambda) * _model_probs + args.knn_lambda * _knn_dist
+                val_local = int(torch.multinomial(_mixed.clamp_min(1e-12), 1).item())
+                _knn_sampled = True
+
+        if not _knn_sampled:
+            val_local = sample_from_logits(v_logits, local_temp, args.top_p)
 
         # ===== Snap TIME_SHIFT to adaptive grid =====
         if args.snap_time_shift and type_name == "TIME_SHIFT":
@@ -718,15 +777,21 @@ def generate(args):
     ]
     decode_to_midi = load_decoder(hint_paths)
 
+    # When a seed was used: decode only the generated tail, not the seed prompt.
+    # BOS is re-prepended so the decoder gets a valid sequence header.
+    decode_seq = [BOS_ID] + seq[seed_offset:] if args.seed_midi else seq
+    if args.seed_midi:
+        print(f"Seed stripped: decoding {len(decode_seq)} generated tokens (of {len(seq)} total)")
+
     try:
-        decode_to_midi(seq, args.vocab_json, args.out_midi)
+        decode_to_midi(decode_seq, args.vocab_json, args.out_midi)
     except TypeError:
         with open(args.vocab_json, "r") as f:
             vocab_dict = json.load(f)
         try:
-            decode_to_midi(seq, vocab_dict, args.out_midi, tempo_bpm=120.0)
+            decode_to_midi(decode_seq, vocab_dict, args.out_midi, tempo_bpm=120.0)
         except TypeError:
-            decode_to_midi(seq, vocab_dict, args.out_midi)
+            decode_to_midi(decode_seq, vocab_dict, args.out_midi)
 
     assert os.path.isfile(args.out_midi), f"Expected to write {args.out_midi} but file not found."
 

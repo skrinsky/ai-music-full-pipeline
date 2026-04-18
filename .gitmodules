@@ -1,3 +1,6 @@
 [submodule "vendor/all-in-one-ai-midi-pipeline"]
 	path = vendor/all-in-one-ai-midi-pipeline
 	url = https://github.com/skrinsky/all-in-one-ai-midi-pipeline.git
+[submodule "vendor/mmt"]
+	path = vendor/mmt
+	url = https://github.com/salu133445/mmt
