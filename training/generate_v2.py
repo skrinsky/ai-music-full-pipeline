@@ -177,6 +177,8 @@ def get_args():
                     help="Snap TIME_SHIFT deltas to a rhythmic grid (auto-detected pulse).")
     ap.add_argument("--grid_straight_steps", type=int, default=6,
                     help="Fallback grid step if pulse detection hasn't fired yet. 6=1/16 note.")
+    ap.add_argument("--force_grid_step", type=int, default=0,
+                    help="Force a fixed grid step, bypassing auto-detection. 6=1/16, 8=1/8-triplet, 12=1/8. 0=auto.")
     ap.add_argument("--grid_detect_window", type=int, default=24,
                     help="How many TIME_SHIFT deltas to collect before locking pulse, and window for re-detection.")
     ap.add_argument("--grid_lock_tokens", type=int, default=96,
@@ -637,8 +639,13 @@ def generate(args):
     max_delta_steps = int(time_shift_size) if time_shift_size is not None else 192
     # Candidate pulse steps in 1/24-QN units: 3=1/32, 4=1/16-triplet, 6=1/16, 8=1/8-triplet, 12=1/8, 16=1/4-triplet, 24=1/4
     GRID_CANDIDATES = [3, 4, 6, 8, 12, 16, 24]
-    grid_step = args.grid_straight_steps   # will be overridden after warmup
-    grid_locked = False                    # False during warmup, True once pulse is chosen
+    if args.force_grid_step > 0:
+        grid_step   = args.force_grid_step
+        grid_locked = True   # skip auto-detection entirely
+        print(f"[grid] forced step={grid_step} (1/{int(round(96/grid_step))} note)")
+    else:
+        grid_step   = args.grid_straight_steps
+        grid_locked = False
     grid_last_flip_at = 0
     recent_deltas = deque(maxlen=args.grid_detect_window)
     warmup_deltas = []                     # raw deltas collected before pulse is locked
