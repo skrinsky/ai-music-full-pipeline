@@ -66,6 +66,8 @@ def main():
     ap.add_argument("--knn_index",            default="")
     ap.add_argument("--knn_k",                type=int,   default=16)
     ap.add_argument("--knn_lambda",           type=float, default=0.3)
+    ap.add_argument("--force_grid_step",      type=int,   default=6,
+                    help="Force TIME_SHIFT grid step. 6=1/16 note, 3=1/32, 0=auto-detect.")
     ap.add_argument("--device",               default="auto")
     ap.add_argument("--tracks",               default="")
     args = ap.parse_args()
@@ -114,6 +116,8 @@ def main():
         ]
         if seed_tempo > 0:
             cmd += ["--tempo_bpm", str(round(seed_tempo, 1))]
+        if args.force_grid_step > 0:
+            cmd += ["--force_grid_step", str(args.force_grid_step)]
         if args.knn_index:
             cmd += ["--knn_index", args.knn_index,
                     "--knn_k",     str(args.knn_k),
