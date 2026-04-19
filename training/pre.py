@@ -1187,6 +1187,9 @@ def main():
                     help=f"Token window length (default {SEQ_LEN}). Use 1024 for longer context training.")
     ap.add_argument("--seq_stride", type=int, default=None,
                     help="Window stride (default: seq_len // 2).")
+    ap.add_argument("--force", action="store_true",
+                    help="Overwrite existing event_vocab.json without prompting. "
+                         "WARNING: this will break any checkpoint trained on the old vocab.")
     args = ap.parse_args()
 
     if args.diagnose_drums:
@@ -1210,6 +1213,15 @@ def main():
     print(f"Window: seq_len={SEQ_LEN}, stride={SEQ_STRIDE}")
 
     os.makedirs(DATA_FOLDER, exist_ok=True)
+
+    existing_vocab = os.path.join(DATA_FOLDER, "event_vocab.json")
+    if os.path.exists(existing_vocab) and not args.force:
+        print(f"\nERROR: {existing_vocab} already exists.")
+        print("Re-running pre.py will overwrite it and break any checkpoint trained on it.")
+        print("If you really want to proceed, pass --force.")
+        print("To safely update only the tempo, use: python scripts/patch_vocab_tempo.py")
+        sys.exit(1)
+
     SAMPLES_DIR = os.path.join(DATA_FOLDER, "_samples")
     os.makedirs(SAMPLES_DIR, exist_ok=True)
 
