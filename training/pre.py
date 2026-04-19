@@ -703,7 +703,7 @@ def decode_to_midi(seq: List[int], vocab: dict, out_path: str, tempo_bpm=120.0):
 
     inst_names = vocab.get("instrument_names") or [f"inst_{i}" for i in range(layout["INST"]["size"])]
 
-    pm = pretty_midi.PrettyMIDI(resolution=960)
+    pm = pretty_midi.PrettyMIDI(resolution=960, initial_tempo=float(tempo_bpm))
     tracks = []
     for i, nm in enumerate(inst_names):
         inst = pretty_midi.Instrument(program=0, name=nm)

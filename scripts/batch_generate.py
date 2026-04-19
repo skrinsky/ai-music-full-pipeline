@@ -30,15 +30,21 @@ from pathlib import Path
 
 
 
-def estimate_n_bars(midi_path: str) -> int:
-    """Estimate number of bars using pretty_midi beat grid (assumes 4/4)."""
+def get_midi_info(midi_path: str) -> tuple[int, float]:
+    """Return (n_bars, tempo_bpm) from a MIDI file."""
     try:
         import pretty_midi
         pm = pretty_midi.PrettyMIDI(midi_path)
         beat_times = pm.get_beats()
-        return max(1, len(beat_times) // 4)
+        n_bars = max(1, len(beat_times) // 4)
+        tc = pm.get_tempo_changes()
+        if tc[1].size > 0:
+            tempo = float(tc[1][0])
+        else:
+            tempo = float(pm.estimate_tempo())
+        return n_bars, max(40.0, min(220.0, tempo))
     except Exception:
-        return 8   # safe fallback
+        return 8, 0.0   # 0.0 = fall back to vocab median
 
 
 def main():
@@ -83,7 +89,7 @@ def main():
     while success < args.n and attempts < args.n * 5:
         attempts += 1
         midi_path = str(random.choice(midi_files))
-        n_bars = estimate_n_bars(midi_path)
+        n_bars, seed_tempo = get_midi_info(midi_path)
         max_start = max(0, n_bars - args.seed_bars - 1)
         start_bar = random.randint(0, max_start)
 
@@ -106,6 +112,8 @@ def main():
             "--entropy_ceiling",      str(args.entropy_ceiling),
             "--device",               args.device,
         ]
+        if seed_tempo > 0:
+            cmd += ["--tempo_bpm", str(round(seed_tempo, 1))]
         if args.knn_index:
             cmd += ["--knn_index", args.knn_index,
                     "--knn_k",     str(args.knn_k),
@@ -113,7 +121,8 @@ def main():
         if args.tracks:
             cmd += ["--tracks", args.tracks]
 
-        print(f"\n[{success+1}/{args.n}] {Path(midi_path).name} bar {start_bar} → {Path(out_midi).name}")
+        tempo_str = f"{seed_tempo:.1f} BPM" if seed_tempo > 0 else "vocab median"
+        print(f"\n[{success+1}/{args.n}] {Path(midi_path).name} bar {start_bar} ({tempo_str}) → {Path(out_midi).name}")
         result = subprocess.run(cmd)
 
         if result.returncode == 0:
