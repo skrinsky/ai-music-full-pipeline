@@ -108,9 +108,13 @@ def score_midi(midi_path: str) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description="Generate N candidates and keep the most musical.")
-    ap.add_argument("--n",        type=int, required=True, help="Number of candidates to generate")
-    ap.add_argument("--top_k",    type=int, default=1,     help="Number of top-ranked MIDIs to keep")
-    ap.add_argument("--out_dir",  required=True,            help="Output directory")
+    ap.add_argument("--n",            type=int, required=True, help="Minimum candidates to generate before checking score")
+    ap.add_argument("--top_k",        type=int, default=1,     help="Number of top-ranked MIDIs to keep")
+    ap.add_argument("--min_score",    type=float, default=0.0,
+                    help="Keep generating until best combined score reaches this threshold. 0=disabled. Try 0.5.")
+    ap.add_argument("--max_attempts", type=int, default=50,
+                    help="Hard cap on total candidates when using --min_score (default 50).")
+    ap.add_argument("--out_dir",      required=True,            help="Output directory")
 
     # Pass-through args for generate_v2.py
     ap.add_argument("--ckpt",               required=True)
@@ -141,10 +145,16 @@ def main():
     gen_script = Path(__file__).resolve().parent.parent / "training" / "generate_v2.py"
 
     candidates = []
+    max_total = args.max_attempts if args.min_score > 0 else args.n
+    i = 0
 
-    for i in range(args.n):
-        out_midi = os.path.join(args.out_dir, f"candidate_{i + 1:03d}.mid")
-        out_meta = os.path.join(args.out_dir, f"candidate_{i + 1:03d}.json")
+    while i < max_total:
+        attempt = i + 1
+        out_midi = os.path.join(args.out_dir, f"candidate_{attempt:03d}.mid")
+        out_meta = os.path.join(args.out_dir, f"candidate_{attempt:03d}.json")
+
+        limit_str = f"/{args.max_attempts} max" if args.min_score > 0 else f"/{args.n}"
+        print(f"\n[{attempt}{limit_str}] Generating candidate_{attempt:03d}.mid ...")
 
         cmd = [
             sys.executable, str(gen_script),
@@ -181,11 +191,11 @@ def main():
         if args.seed is not None:
             cmd += ["--seed", str(args.seed + i)]
 
-        print(f"\n[{i + 1}/{args.n}] Generating candidate_{i + 1:03d}.mid ...")
         result = subprocess.run(cmd)
 
         if result.returncode != 0 or not os.path.isfile(out_midi):
             print(f"  FAILED (exit {result.returncode})")
+            i += 1
             continue
 
         heuristic = score_midi(out_midi)
@@ -213,11 +223,18 @@ def main():
             "combined":   round(combined, 4),
         })
 
+        best_so_far = max(c["combined"] for c in candidates)
         print(f"  score={combined:.3f}  "
               f"notes={heuristic.get('n_notes', '?')}  "
               f"insts={heuristic.get('n_active_instruments', '?')}  "
               f"pitch_H={heuristic.get('pitch_entropy_bits', 0):.2f}bits  "
-              f"conf={avg_log_prob:.3f}")
+              f"conf={avg_log_prob:.3f}  best={best_so_far:.3f}")
+
+        i += 1
+        # Stop early if we've hit the minimum batch AND met the score threshold
+        if i >= args.n and args.min_score > 0 and best_so_far >= args.min_score:
+            print(f"\nReached target score {best_so_far:.3f} >= {args.min_score} after {i} candidates.")
+            break
 
     if not candidates:
         print("\nNo successful candidates generated.")
