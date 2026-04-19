@@ -192,6 +192,8 @@ def get_args():
     ap.add_argument("--seed_midi", default="", help="Path to a MIDI file to use as the opening prompt. The seed is fed as context but NOT written to the output MIDI.")
     ap.add_argument("--seed_bars", type=int, default=0, help="How many bars of the seed to use as context (0 = all).")
     ap.add_argument("--seed_start_bar", type=int, default=0, help="Bar offset within the seed MIDI to start from (default: 0 = beginning).")
+    ap.add_argument("--seed_pkl", default="", help="Path to events_train.pkl. Picks a random training sequence as seed context.")
+    ap.add_argument("--seed_pkl_tokens", type=int, default=128, help="How many tokens from the random pkl sequence to use as seed (default: 128).")
 
     # ===== KNN-LM guidance =====
     ap.add_argument("--knn_index", default="", help="Path prefix for FAISS index built by build_knn_index.py (loads <prefix>.faiss + <prefix>.npz). Empty = disabled.")
@@ -610,8 +612,24 @@ def generate(args):
             return [maybe_idx("DUR")] if has("DUR") else list(range(len(type_names)))
         return [maybe_idx("TIME_SHIFT")] if has("TIME_SHIFT") else list(range(len(type_names)))
 
-    # state — optionally seed from a MIDI file
-    if args.seed_midi:
+    # state — optionally seed from a MIDI file or training pkl
+    if args.seed_pkl:
+        import pickle as _pickle
+        with open(args.seed_pkl, "rb") as _f:
+            _pkl = _pickle.load(_f)
+        _seqs = _pkl["sequences"] if isinstance(_pkl, dict) and "sequences" in _pkl else _pkl
+        _chosen = random.choice(_seqs)
+        seed_tokens = [int(t) for t in _chosen[:args.seed_pkl_tokens] if int(t) != BOS_ID]
+        seq = [BOS_ID] + seed_tokens
+        seed_offset = len(seq)
+        phase, last_inst = infer_phase_from_tokens(seed_tokens, layout, type_names)
+        notes_placed = sum(1 for t in seed_tokens if any(
+            layout[n]["start"] <= t < layout[n]["start"] + layout[n]["size"]
+            for n in type_names if n.startswith("PITCH")
+        ))
+        print(f"Seed pkl: {args.seed_pkl} → picked random sequence, using first {len(seed_tokens)} tokens, {notes_placed} notes, phase={phase}")
+        print("(seed tokens used as context only — NOT written to output MIDI)")
+    elif args.seed_midi:
         seed_tokens = tokenize_seed_midi(args.seed_midi, vocab, max_bars=args.seed_bars, start_bar=args.seed_start_bar)
         seq = [BOS_ID] + seed_tokens
         seed_offset = len(seq)   # generated tokens start here; seed is NOT written to output MIDI
@@ -823,8 +841,9 @@ def generate(args):
 
     # When a seed was used: decode only the generated tail, not the seed prompt.
     # BOS is re-prepended so the decoder gets a valid sequence header.
-    decode_seq = [BOS_ID] + seq[seed_offset:] if args.seed_midi else seq
-    if args.seed_midi:
+    _used_seed = bool(args.seed_midi or args.seed_pkl)
+    decode_seq = [BOS_ID] + seq[seed_offset:] if _used_seed else seq
+    if _used_seed:
         print(f"Seed stripped: decoding {len(decode_seq)} generated tokens (of {len(seq)} total)")
 
     # Resolve playback tempo: CLI > vocab median > 120 BPM fallback
@@ -869,6 +888,7 @@ def generate(args):
         "out_midi": args.out_midi,
         "sequence_len": len(seq),
         "seed_midi": args.seed_midi or None,
+        "seed_pkl": args.seed_pkl or None,
         "seed_bars": args.seed_bars if args.seed_midi else None,
         "note": "TIME_SHIFT snapped to adaptive straight/triplet grid in 1/24-qn steps."
     }
