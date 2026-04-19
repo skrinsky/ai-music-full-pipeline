@@ -74,6 +74,7 @@ def main():
     ap.add_argument("--seed",       type=int, default=None,     help="Global random seed (for reproducibility)")
     # Pass-through args for generate_v2.py
     ap.add_argument("--max_tokens",           type=int,   default=512)
+    ap.add_argument("--ctx",                  type=int,   default=512)
     ap.add_argument("--min_notes_before_stop",type=int,   default=40)
     ap.add_argument("--temperature",          type=float, default=0.75)
     ap.add_argument("--top_p",                type=float, default=0.75)
@@ -138,6 +139,7 @@ def main():
             "--seed_midi",   tmp_seed,
             "--seed_bars",   "0",   # already trimmed to the right window
             "--max_tokens",           str(args.max_tokens),
+            "--ctx",                  str(args.ctx),
             "--min_notes_before_stop",str(args.min_notes_before_stop),
             "--temperature",          str(args.temperature),
             "--top_p",                str(args.top_p),
