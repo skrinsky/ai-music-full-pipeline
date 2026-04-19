@@ -231,8 +231,8 @@ def main():
               f"conf={avg_log_prob:.3f}  best={best_so_far:.3f}")
 
         i += 1
-        # Stop early if we've hit the minimum batch AND met the score threshold
-        if i >= args.n and args.min_score > 0 and best_so_far >= args.min_score:
+        # After every full batch of --n, check if we've hit the threshold
+        if args.min_score > 0 and i % args.n == 0 and best_so_far >= args.min_score:
             print(f"\nReached target score {best_so_far:.3f} >= {args.min_score} after {i} candidates.")
             break
 
