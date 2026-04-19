@@ -26,41 +26,19 @@ import os
 import random
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
-def trim_midi(src_path: str, start_sec: float, end_sec: float, dst_path: str):
-    import pretty_midi
-    pm = pretty_midi.PrettyMIDI(src_path)
-    for inst in pm.instruments:
-        kept = []
-        for n in inst.notes:
-            if n.start >= start_sec and n.start < end_sec:
-                n.start = max(0.0, n.start - start_sec)
-                n.end   = max(n.start + 0.01, n.end - start_sec)
-                kept.append(n)
-        inst.notes = kept
-    pm.write(dst_path)
 
-
-def estimate_bar_times(midi_path: str, seed_bars: int):
-    """Return list of bar start times (seconds) using pretty_midi tempo map."""
-    import pretty_midi
-    pm = pretty_midi.PrettyMIDI(midi_path)
-    total = pm.get_end_time()
-    if total < 1.0:
-        return []
-
-    # Use the tempo map to compute beat times, group into bars (assume 4/4)
-    beat_times = pm.get_beats()
-    beats_per_bar = 4
-    bar_starts = [beat_times[i] for i in range(0, len(beat_times), beats_per_bar)]
-
-    # Need at least seed_bars+1 bar starts to pick a non-trivial window
-    if len(bar_starts) < seed_bars + 1:
-        return []
-    return bar_starts
+def estimate_n_bars(midi_path: str) -> int:
+    """Estimate number of bars using pretty_midi beat grid (assumes 4/4)."""
+    try:
+        import pretty_midi
+        pm = pretty_midi.PrettyMIDI(midi_path)
+        beat_times = pm.get_beats()
+        return max(1, len(beat_times) // 4)
+    except Exception:
+        return 8   # safe fallback
 
 
 def main():
@@ -105,39 +83,21 @@ def main():
     while success < args.n and attempts < args.n * 5:
         attempts += 1
         midi_path = str(random.choice(midi_files))
-        bar_times = estimate_bar_times(midi_path, args.seed_bars)
-        if not bar_times:
-            print(f"  skip (too short): {Path(midi_path).name}")
-            continue
+        n_bars = estimate_n_bars(midi_path)
+        max_start = max(0, n_bars - args.seed_bars - 1)
+        start_bar = random.randint(0, max_start)
 
-        # Pick a random bar to start from (leave room for seed_bars)
-        max_start_idx = len(bar_times) - args.seed_bars - 1
-        if max_start_idx < 0:
-            max_start_idx = 0
-        start_idx = random.randint(0, max_start_idx)
-        start_sec = bar_times[start_idx]
-        end_idx   = min(start_idx + args.seed_bars, len(bar_times) - 1)
-        end_sec   = bar_times[end_idx]
-
-        tag = f"{Path(midi_path).stem}_bar{start_idx:03d}"
+        tag = f"{Path(midi_path).stem}_bar{start_bar:03d}"
         out_midi = os.path.join(args.out_dir, f"gen_{success+1:03d}_{tag}.mid")
-
-        with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tf:
-            tmp_seed = tf.name
-        try:
-            trim_midi(midi_path, start_sec, end_sec, tmp_seed)
-        except Exception as e:
-            print(f"  trim failed ({Path(midi_path).name} bar {start_idx}): {e}")
-            os.unlink(tmp_seed)
-            continue
 
         cmd = [
             sys.executable, str(gen_script),
-            "--ckpt",        args.ckpt,
-            "--vocab_json",  args.vocab_json,
-            "--out_midi",    out_midi,
-            "--seed_midi",   tmp_seed,
-            "--seed_bars",   "0",   # already trimmed to the right window
+            "--ckpt",           args.ckpt,
+            "--vocab_json",     args.vocab_json,
+            "--out_midi",       out_midi,
+            "--seed_midi",      midi_path,
+            "--seed_start_bar", str(start_bar),
+            "--seed_bars",      str(args.seed_bars),
             "--max_tokens",           str(args.max_tokens),
             "--ctx",                  str(args.ctx),
             "--min_notes_before_stop",str(args.min_notes_before_stop),
@@ -153,9 +113,8 @@ def main():
         if args.tracks:
             cmd += ["--tracks", args.tracks]
 
-        print(f"\n[{success+1}/{args.n}] {Path(midi_path).name} bar {start_idx} → {Path(out_midi).name}")
+        print(f"\n[{success+1}/{args.n}] {Path(midi_path).name} bar {start_bar} → {Path(out_midi).name}")
         result = subprocess.run(cmd)
-        os.unlink(tmp_seed)
 
         if result.returncode == 0:
             success += 1

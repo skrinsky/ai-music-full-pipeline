@@ -186,7 +186,8 @@ def get_args():
 
     # ===== MIDI seed (prompt) =====
     ap.add_argument("--seed_midi", default="", help="Path to a MIDI file to use as the opening prompt. The seed is fed as context but NOT written to the output MIDI.")
-    ap.add_argument("--seed_bars", type=int, default=0, help="Limit seed MIDI to the first N bars (0 = use entire file).")
+    ap.add_argument("--seed_bars", type=int, default=0, help="How many bars of the seed to use as context (0 = all).")
+    ap.add_argument("--seed_start_bar", type=int, default=0, help="Bar offset within the seed MIDI to start from (default: 0 = beginning).")
 
     # ===== KNN-LM guidance =====
     ap.add_argument("--knn_index", default="", help="Path prefix for FAISS index built by build_knn_index.py (loads <prefix>.faiss + <prefix>.npz). Empty = disabled.")
@@ -356,13 +357,14 @@ def fit_error(delta_steps: int, step: int) -> float:
 
 # =================== Seed MIDI ===================
 
-def tokenize_seed_midi(midi_path: str, vocab: dict, max_bars: int = 0) -> list[int]:
+def tokenize_seed_midi(midi_path: str, vocab: dict, max_bars: int = 0, start_bar: int = 0) -> list[int]:
     """Tokenize a MIDI file into event tokens using the training vocab.
 
     Returns token list *without* BOS/EOS so the caller can splice it
     into the generation sequence.
+    start_bar: skip this many bars before collecting seed context.
+    max_bars:  how many bars to use as context (0 = all remaining).
     """
-    # Reuse the same sys.path setup as load_decoder
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.dirname(here)
     for p in [root, here]:
@@ -374,15 +376,31 @@ def tokenize_seed_midi(midi_path: str, vocab: dict, max_bars: int = 0) -> list[i
     if not ev:
         raise ValueError(f"Seed MIDI {midi_path} produced zero events")
 
-    # Optionally truncate to first N bars
-    if max_bars > 0 and len(bar_starts) > max_bars:
-        cutoff_sec = float(bar_starts[max_bars])
-        ev = [(s, i, m, v, d) for (s, i, m, v, d) in ev if s < cutoff_sec]
-        if not ev:
-            raise ValueError(f"Seed MIDI has no events in the first {max_bars} bars")
+    # Clamp start_bar to valid range
+    start_bar = max(0, min(start_bar, len(bar_starts) - 1))
+    start_sec = float(bar_starts[start_bar]) if start_bar < len(bar_starts) else 0.0
+
+    # Determine end cutoff
+    end_bar = start_bar + max_bars if max_bars > 0 else len(bar_starts)
+    if end_bar < len(bar_starts):
+        end_sec = float(bar_starts[end_bar])
+        ev = [(s, i, m, v, d) for (s, i, m, v, d) in ev if start_sec <= s < end_sec]
+    else:
+        ev = [(s, i, m, v, d) for (s, i, m, v, d) in ev if s >= start_sec]
+
+    if not ev:
+        raise ValueError(f"Seed MIDI has no events in bars {start_bar}–{end_bar}")
+
+    # Re-zero event times so bar start_bar becomes t=0
+    if start_sec > 0:
+        ev = [(s - start_sec, i, m, v, d) for (s, i, m, v, d) in ev]
+        bar_starts = [b - start_sec for b in bar_starts[start_bar:]]
+        bars_meta  = bars_meta[start_bar:] if bars_meta else bars_meta
+    elif start_bar > 0:
+        bar_starts = bar_starts[start_bar:]
+        bars_meta  = bars_meta[start_bar:] if bars_meta else bars_meta
 
     tokens = tokenize_song(ev, tempo, bar_starts, bars_meta, vocab)
-    # Strip BOS and EOS — caller adds BOS and generation continues from here
     bos = vocab["layout"]["BOS"]["start"]
     eos = vocab["layout"]["EOS"]["start"]
     tokens = [t for t in tokens if t != bos and t != eos]
@@ -588,7 +606,7 @@ def generate(args):
 
     # state — optionally seed from a MIDI file
     if args.seed_midi:
-        seed_tokens = tokenize_seed_midi(args.seed_midi, vocab, max_bars=args.seed_bars)
+        seed_tokens = tokenize_seed_midi(args.seed_midi, vocab, max_bars=args.seed_bars, start_bar=args.seed_start_bar)
         seq = [BOS_ID] + seed_tokens
         seed_offset = len(seq)   # generated tokens start here; seed is NOT written to output MIDI
         phase, last_inst = infer_phase_from_tokens(seed_tokens, layout, type_names)
