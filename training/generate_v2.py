@@ -671,6 +671,8 @@ def generate(args):
     warmup_deltas = []                     # raw deltas collected before pulse is locked
 
     t0 = time.time()
+    _total_log_prob = 0.0
+    _n_scored = 0
     while len(seq) < args.max_tokens:
         ctx = torch.tensor(seq[-args.ctx:], dtype=torch.long, device=device).unsqueeze(0)
         if knn_index is not None:
@@ -796,6 +798,13 @@ def generate(args):
         global_id = starts[type_name] + int(val_local)
         seq.append(global_id)
 
+        # Track generation confidence (avg log-prob of chosen type + value)
+        with torch.no_grad():
+            lp_type = torch.log_softmax(masked, dim=-1)[type_choice].item()
+            lp_val  = torch.log_softmax(v_logits, dim=-1)[int(val_local)].item()
+            _total_log_prob += lp_type + lp_val
+            _n_scored += 1
+
         # transitions
         if type_name == "TIME_SHIFT":
             phase = "POST_TS"; since_note_tokens += 1; notes_this_step = 0
@@ -887,6 +896,7 @@ def generate(args):
         "device": device,
         "out_midi": args.out_midi,
         "sequence_len": len(seq),
+        "avg_log_prob": round(_total_log_prob / max(1, _n_scored), 4),
         "seed_midi": args.seed_midi or None,
         "seed_pkl": args.seed_pkl or None,
         "seed_bars": args.seed_bars if args.seed_midi else None,
