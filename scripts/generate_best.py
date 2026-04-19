@@ -85,11 +85,11 @@ def score_midi(midi_path: str) -> dict:
         rhythmic_score = 0.5
 
     total = (
-        count_score    * 0.25 +
-        inst_score     * 0.30 +
+        inst_score     * 0.25 +
+        rhythmic_score * 0.25 +
+        count_score    * 0.20 +
         entropy_score  * 0.20 +
-        density_score  * 0.15 +
-        rhythmic_score * 0.10
+        density_score  * 0.10
     )
 
     return {
