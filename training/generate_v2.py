@@ -341,7 +341,9 @@ def hash_file(path):
 def nearest_multiple(x: int, step: int) -> int:
     if step <= 1:
         return x
-    return int(step * round(float(x) / float(step)))
+    # Use // and + to avoid Python banker's rounding snapping small values to 0
+    rounded = int(step * round(float(x) / float(step)))
+    return max(step, rounded)
 
 def snap_delta(delta_steps: int, mode: str, straight_step: int, triplet_step: int, max_delta: int) -> int:
     delta_steps = max(1, min(int(delta_steps), int(max_delta)))
@@ -770,7 +772,7 @@ def generate(args):
                         grid_last_flip_at = len(seq)
 
                 snapped = nearest_multiple(raw_delta, grid_step)
-                snapped = max(1, min(int(snapped), int(max_delta_steps)))
+                snapped = max(grid_step, min(int(snapped), int(max_delta_steps)))
                 val_local = int(snapped - 1)
 
         global_id = starts[type_name] + int(val_local)
