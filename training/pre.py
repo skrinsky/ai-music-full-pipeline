@@ -1335,6 +1335,16 @@ def main():
     vocab = compact_vocab(train_seqs, val_seqs, vocab)
 
     # 6) Save
+    # Store median training tempo so decode_to_midi can use it at generation time
+    all_tempos = [song_meta[p][1] for p in song_meta if song_meta[p][1] > 0]
+    if all_tempos:
+        all_tempos_sorted = sorted(all_tempos)
+        n = len(all_tempos_sorted)
+        median_tempo = (all_tempos_sorted[n // 2] if n % 2 == 1
+                        else (all_tempos_sorted[n // 2 - 1] + all_tempos_sorted[n // 2]) / 2.0)
+        vocab["median_tempo_bpm"] = round(float(median_tempo), 2)
+        print(f"Median training tempo: {vocab['median_tempo_bpm']:.1f} BPM  (n={n}, range={min(all_tempos):.0f}–{max(all_tempos):.0f})")
+
     with open(os.path.join(DATA_FOLDER, "events_train.pkl"), "wb") as f:
         pickle.dump({"sequences": train_seqs, "aux": train_aux}, f)
     with open(os.path.join(DATA_FOLDER, "events_val.pkl"), "wb") as f:

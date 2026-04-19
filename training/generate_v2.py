@@ -182,6 +182,8 @@ def get_args():
     ap.add_argument("--grid_lock_tokens", type=int, default=96,
                     help="Minimum tokens between pulse re-detection checks.")
 
+    ap.add_argument("--tempo_bpm", type=float, default=0.0,
+                    help="Playback tempo for output MIDI (BPM). 0 = read from vocab median_tempo_bpm, fallback 120.")
     ap.add_argument("--seed", type=int, default=None)
 
     # ===== MIDI seed (prompt) =====
@@ -816,15 +818,20 @@ def generate(args):
     if args.seed_midi:
         print(f"Seed stripped: decoding {len(decode_seq)} generated tokens (of {len(seq)} total)")
 
+    # Resolve playback tempo: CLI > vocab median > 120 BPM fallback
+    if args.tempo_bpm > 0:
+        out_tempo = args.tempo_bpm
+    else:
+        out_tempo = float(vocab.get("median_tempo_bpm", 0) or 120.0)
+    print(f"Output tempo: {out_tempo:.1f} BPM")
+
     try:
-        decode_to_midi(decode_seq, args.vocab_json, args.out_midi)
+        decode_to_midi(decode_seq, args.vocab_json, args.out_midi, tempo_bpm=out_tempo)
     except TypeError:
-        with open(args.vocab_json, "r") as f:
-            vocab_dict = json.load(f)
         try:
-            decode_to_midi(decode_seq, vocab_dict, args.out_midi, tempo_bpm=120.0)
+            decode_to_midi(decode_seq, vocab, args.out_midi, tempo_bpm=out_tempo)
         except TypeError:
-            decode_to_midi(decode_seq, vocab_dict, args.out_midi)
+            decode_to_midi(decode_seq, vocab, args.out_midi)
 
     assert os.path.isfile(args.out_midi), f"Expected to write {args.out_midi} but file not found."
 
