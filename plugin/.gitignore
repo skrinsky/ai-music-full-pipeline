@@ -1,0 +1,8 @@
+# Build output — never commit
+AIMusicPlugin/build/
+AIMusicPlugin/build-xcode/
+AIMusicPlugin/Builds/
+
+# macOS
+.DS_Store
+*.xcuserstate

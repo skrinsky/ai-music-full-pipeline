@@ -1,0 +1,51 @@
+#pragma once
+#include <juce_core/juce_core.h>
+
+struct PipelineStatus
+{
+    juce::String stage;      // idle | processing | training | generating | done | error
+    juce::String message;
+    int    epoch      = -1;
+    int    totalEpochs= -1;
+    double valLoss    = -1.0;
+    juce::String error;
+};
+
+// Thin HTTP client that talks to plugin/server.py on localhost:7437
+class PipelineClient
+{
+public:
+    explicit PipelineClient (int port = 7437);
+
+    bool        isServerReachable();
+    PipelineStatus getStatus();
+
+    // Fire-and-forget POST calls — server runs jobs in background threads
+    bool postProcess (const juce::String& audioFolder,
+                      const juce::String& tracks = {},
+                      bool normalizeKey = true);
+
+    bool postTrain   (const juce::String& eventsDir  = "runs/events",
+                      const juce::String& ckptPath   = "runs/checkpoints/es_model.pt",
+                      const juce::String& device     = "auto",
+                      int epochs = 200);
+
+    // Returns job_id on success, empty string on failure
+    juce::String postGenerate (const juce::String& ckpt,
+                               const juce::String& vocabJson,
+                               const juce::String& seedPkl = {},
+                               float temperature   = 0.75f,
+                               float topP          = 0.95f,
+                               float tempoBpm      = 75.0f,
+                               int   forceGridStep = 6,
+                               int   maxTokens     = 512);
+
+    // Download MIDI for a completed job; returns true + fills midiData on success
+    bool fetchMidi (const juce::String& jobId, juce::MemoryBlock& midiData);
+
+private:
+    juce::String baseUrl;
+
+    juce::String get  (const juce::String& path);
+    juce::String post (const juce::String& path, const juce::String& jsonBody);
+};
