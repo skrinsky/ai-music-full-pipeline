@@ -457,9 +457,13 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
         float r  = std::min (width, height) * 0.5f - 3.f;
         if (r < 5.f) return;
 
-        // outer purple glow
-        g.setColour (juce::Colour (0xff6633cc).withAlpha (0.22f));
-        g.fillEllipse (cx - r - 4.f, cy - r - 4.f, (r + 4.f) * 2.f, (r + 4.f) * 2.f);
+        // outer purple glow — very subtle slow pulse
+        {
+            float t    = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            float glow = 0.19f + 0.03f * std::sin (t * 0.32f + sliderPos * 5.1f);
+            g.setColour (juce::Colour (0xff6633cc).withAlpha (glow));
+            g.fillEllipse (cx - r - 4.f, cy - r - 4.f, (r + 4.f) * 2.f, (r + 4.f) * 2.f);
+        }
 
         // gold frame
         juce::ColourGradient frameGrad (
@@ -479,9 +483,25 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
         g.setGradientFill (surf);
         g.fillEllipse (cx - sr, cy - sr, sr * 2.f, sr * 2.f);
 
-        // shimmer highlight
-        g.setColour (juce::Colours::white.withAlpha (0.05f));
-        g.fillEllipse (cx - sr * 0.18f, cy - sr * 0.92f, sr * 0.44f, sr * 1.3f);
+        // shimmer highlight — very slowly breathes and drifts
+        {
+            float t  = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            float s1 = std::sin (t * 0.31f);          // primary breath
+            float s2 = std::sin (t * 0.19f + 0.8f);  // secondary drift, different rate
+
+            // Main highlight: alpha breathes 0.04–0.07, x position drifts slightly
+            float a1  = 0.055f + 0.018f * s1;
+            float ox1 = sr * 0.03f * s2;
+            g.setColour (juce::Colours::white.withAlpha (a1));
+            g.fillEllipse (cx - sr * 0.18f + ox1, cy - sr * 0.92f, sr * 0.44f, sr * 1.3f);
+
+            // Tiny secondary glint that slides a little further, nearly invisible
+            float a2  = 0.018f + 0.010f * s2;
+            float ox2 = sr * 0.10f * s1;
+            g.setColour (juce::Colours::white.withAlpha (a2));
+            g.fillEllipse (cx - sr * 0.08f + ox2, cy - sr * 0.78f, sr * 0.20f, sr * 0.55f);
+
+        }
 
         // inner bevel
         g.setColour (juce::Colour (0xff2a1800).withAlpha (0.4f));
@@ -539,6 +559,37 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
         g.fillEllipse (dotX - 2.8f, dotY - 2.8f, 5.6f, 5.6f);
         g.setColour (juce::Colours::white.withAlpha (0.90f));
         g.fillEllipse (dotX - 1.4f, dotY - 1.4f, 2.8f, 2.8f);
+
+        // Dancing reflection twinkle — sliderPos is naturally different per knob
+        // (temp ~0.34, topP ~0.94, length ~0.23, tempo ~0.4) so it seeds unique timing.
+        {
+            float t  = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            float ph = sliderPos * 7.3f;  // spread the four knobs well apart in phase
+
+            // Beat of two incommensurable rates → irregular on/off timing
+            float beat = std::sin (t * 0.73f + ph) * std::sin (t * 1.17f + ph + 0.9f);
+            float tw   = std::max (0.f, beat * beat * beat * beat);  // sharp, brief
+
+            if (tw > 0.01f)
+            {
+                // Position wanders independently in x/y within the existing lit zone
+                float wx = cx - sr * 0.15f + sr * 0.10f * std::sin (t * 0.31f + ph);
+                float wy = cy - sr * 0.55f + sr * 0.07f * std::sin (t * 0.21f + ph + 1.2f);
+
+                // Pale blue-lavender — same family as the knob's existing shimmer
+                auto col = juce::Colour (0xffcce6ff);
+
+                g.setColour (col.withAlpha (tw * 0.10f));
+                g.fillEllipse (wx - sr * 0.17f, wy - sr * 0.10f, sr * 0.34f, sr * 0.20f);
+
+                g.setColour (col.withAlpha (tw * 0.30f));
+                g.fillEllipse (wx - sr * 0.06f, wy - sr * 0.04f, sr * 0.12f, sr * 0.08f);
+
+                g.setColour (juce::Colours::white.withAlpha (tw * 0.45f));
+                float cr = sr * 0.028f;
+                g.fillEllipse (wx - cr, wy - cr, cr * 2.f, cr * 2.f);
+            }
+        }
     }
 };
 
