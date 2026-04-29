@@ -62,6 +62,10 @@ _status: dict = {
 # generated MIDI files keyed by job_id
 _midi_files: dict[str, Path] = {}
 
+# currently running subprocess (so /cancel can kill it)
+_current_proc: Optional[subprocess.Popen] = None
+_cancelled = threading.Event()
+
 
 def _set_status(**kwargs):
     _status.update(kwargs)
@@ -72,6 +76,7 @@ def _set_status(**kwargs):
 def _run_streaming(cmd: list[str], cwd: Path, parse_fn=None):
     """Run a subprocess, stream stdout, optionally parse each line.
     Returns (returncode, last_lines) where last_lines is the tail of output."""
+    global _current_proc
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -79,16 +84,27 @@ def _run_streaming(cmd: list[str], cwd: Path, parse_fn=None):
         text=True,
         cwd=str(cwd),
     )
+    _current_proc = proc
     tail: list[str] = []
-    for line in proc.stdout:
-        line = line.rstrip()
-        print(line, flush=True)
-        tail.append(line)
-        if len(tail) > 20:
-            tail.pop(0)
-        if parse_fn:
-            parse_fn(line)
-    proc.wait()
+
+    def _read():
+        for line in proc.stdout:
+            line = line.rstrip()
+            try:
+                print(line, flush=True)
+            except BrokenPipeError:
+                pass
+            tail.append(line)
+            if len(tail) > 20:
+                tail.pop(0)
+            if parse_fn:
+                parse_fn(line)
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    proc.wait()                # returns as soon as the main process exits
+    reader.join(timeout=5.0)  # drain remaining output; don't hang if torch workers hold the pipe
+    _current_proc = None
     return proc.returncode, tail
 
 
@@ -116,16 +132,19 @@ class TrainRequest(BaseModel):
     ckpt_path: str = "runs/checkpoints/es_model.pt"
     device: str = "auto"
     epochs: int = 200
+    seq_len: int = 512
 
 
 class GenerateRequest(BaseModel):
     ckpt: str
     vocab_json: str
     seed_pkl: str = ""
+    use_seed: bool = False
     temperature: float = 0.75
     top_p: float = 0.95
     tempo_bpm: float = 75.0
-    force_grid_step: int = 6
+    grid_straight_step: int = 6
+    grid_triplet_step: int = 0
     max_tokens: int = 512
 
 
@@ -136,9 +155,35 @@ def health():
     return {"ok": True}
 
 
+@app.get("/checkpoint_info")
+def checkpoint_info(ckpt: str):
+    import torch
+    try:
+        data = torch.load(ckpt, map_location="cpu", weights_only=False)
+        seq_len = None
+        for key in ("config", "model_config"):
+            if key in data and "SEQ_LEN" in data[key]:
+                seq_len = int(data[key]["SEQ_LEN"])
+                break
+        return {"seq_len": seq_len}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/status")
 def status():
     return dict(_status)
+
+
+@app.post("/cancel")
+def cancel():
+    global _current_proc
+    _cancelled.set()
+    if _current_proc is not None and _current_proc.poll() is None:
+        _current_proc.kill()  # SIGKILL — can't be ignored
+    _set_status(stage="idle", message="cancelled", error=None,
+                epoch=None, val_loss=None)
+    return {"cancelled": True}
 
 
 @app.post("/process")
@@ -167,7 +212,8 @@ def process(req: ProcessRequest):
 
             rc, tail = _run_streaming(pipe_args, cwd=pipe_dir)
             if rc != 0:
-                _set_status(stage="error", error="vendor pipeline failed: " + " | ".join(tail[-3:]))
+                if not _cancelled.is_set():
+                    _set_status(stage="error", error="vendor pipeline failed: " + " | ".join(tail[-3:]))
                 return
 
             # Step 2: export MIDI
@@ -176,7 +222,8 @@ def process(req: ProcessRequest):
                 cwd=pipe_dir,
             )
             if rc != 0:
-                _set_status(stage="error", error="MIDI export failed: " + " | ".join(tail[-3:]))
+                if not _cancelled.is_set():
+                    _set_status(stage="error", error="MIDI export failed: " + " | ".join(tail[-3:]))
                 return
 
             # Step 3: preprocess → events
@@ -190,11 +237,13 @@ def process(req: ProcessRequest):
 
             rc, tail = _run_streaming(pre_args, cwd=ROOT)
             if rc != 0:
-                _set_status(stage="error", error="preprocessing failed: " + " | ".join(tail[-3:]))
+                if not _cancelled.is_set():
+                    _set_status(stage="error", error="preprocessing failed: " + " | ".join(tail[-3:]))
                 return
 
             _set_status(stage="done", message="processing complete")
         finally:
+            _cancelled.clear()
             _job_lock.release()
 
     threading.Thread(target=run, daemon=True).start()
@@ -224,15 +273,18 @@ def train(req: TrainRequest):
                 "--save_path",  ckpt_path,
                 "--device",     req.device,
                 "--epochs",     str(req.epochs),
+                "--seq_len",    str(req.seq_len),
             ]
 
             rc, tail = _run_streaming(cmd, cwd=ROOT, parse_fn=_parse_train_line)
             if rc != 0:
-                _set_status(stage="error", error="training failed: " + " | ".join(tail[-3:]))
+                if not _cancelled.is_set():
+                    _set_status(stage="error", error="training failed: " + " | ".join(tail[-3:]))
                 return
 
             _set_status(stage="done", message="training complete")
         finally:
+            _cancelled.clear()
             _job_lock.release()
 
     threading.Thread(target=run, daemon=True).start()
@@ -302,6 +354,16 @@ def generate(req: GenerateRequest):
                                   "download the matching vocab into any runs/*/event_vocab.json")
                 return
 
+            # Resolve seed: explicit path wins; use_seed auto-finds events_val.pkl
+            seed_pkl = req.seed_pkl
+            if req.use_seed and not seed_pkl and vocab_path is not None:
+                candidate_seed = vocab_path.parent / "events_val.pkl"
+                if candidate_seed.exists():
+                    seed_pkl = str(candidate_seed)
+                    print(f"[generate] seeding from {candidate_seed}")
+                else:
+                    print(f"[generate] seed requested but {candidate_seed} not found — generating randomly")
+
             out_mid = out_dir / "generated.mid"
             cmd = [
                 PYTHON, str(ROOT / "training" / "generate_v2.py"),
@@ -311,28 +373,40 @@ def generate(req: GenerateRequest):
                 "--temperature",     str(req.temperature),
                 "--top_p",           str(req.top_p),
                 "--tempo_bpm",       str(req.tempo_bpm),
-                "--force_grid_step", str(req.force_grid_step),
+                "--force_grid_step",   str(req.grid_straight_step),
+                "--grid_triplet_step", str(req.grid_triplet_step),
                 "--max_tokens",      str(req.max_tokens),
                 "--device",          "auto",
             ]
-            if req.seed_pkl:
-                cmd += ["--seed_pkl", str(Path(req.seed_pkl).resolve())]
+            if seed_pkl:
+                cmd += ["--seed_pkl", str(Path(seed_pkl).resolve())]
 
             rc, tail = _run_streaming(cmd, cwd=ROOT)
             if rc != 0:
-                _set_status(stage="error", error=" | ".join(tail[-5:]) or "generation failed")
+                if not _cancelled.is_set():
+                    _set_status(stage="error", error=" | ".join(tail[-5:]) or "generation failed")
                 return
 
             if not out_mid.exists():
-                _set_status(stage="error", error="no MIDI produced")
+                if not _cancelled.is_set():
+                    _set_status(stage="error", error="no MIDI produced")
                 return
 
             _midi_files[job_id] = out_mid
 
-            daw_result = daw_insert.insert_midi(str(out_mid))
+            try:
+                daw_result = daw_insert.insert_midi(str(out_mid))
+            except Exception as e:
+                print(f"[generate] daw_insert error (ignored): {e}")
+                daw_result = "insert_error"
+
             _set_status(stage="done", message=f"midi_id={job_id}",
                         daw_insert=daw_result)
+        except Exception as e:
+            if not _cancelled.is_set():
+                _set_status(stage="error", error=str(e))
         finally:
+            _cancelled.clear()
             _job_lock.release()
 
     threading.Thread(target=run, daemon=True).start()

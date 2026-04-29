@@ -28,20 +28,28 @@ public:
     bool postTrain   (const juce::String& eventsDir  = "runs/events",
                       const juce::String& ckptPath   = "runs/checkpoints/es_model.pt",
                       const juce::String& device     = "auto",
-                      int epochs = 200);
+                      int epochs = 200,
+                      int seqLen = 512);
 
     // Returns job_id on success, empty string on failure
     juce::String postGenerate (const juce::String& ckpt,
                                const juce::String& vocabJson,
-                               const juce::String& seedPkl = {},
-                               float temperature   = 0.75f,
-                               float topP          = 0.95f,
-                               float tempoBpm      = 75.0f,
-                               int   forceGridStep = 6,
-                               int   maxTokens     = 512);
+                               const juce::String& seedPkl      = {},
+                               float temperature                 = 0.75f,
+                               float topP                        = 0.95f,
+                               float tempoBpm                    = 75.0f,
+                               int   gridStraightStep            = 6,
+                               int   gridTripletStep             = 0,
+                               int   maxTokens                   = 512,
+                               bool  useSeed                     = false);
+
+    bool postCancel();
 
     // Download MIDI for a completed job; returns true + fills midiData on success
     bool fetchMidi (const juce::String& jobId, juce::MemoryBlock& midiData);
+
+    // Returns the SEQ_LEN the checkpoint was trained with, or 0 on failure
+    int fetchCheckpointInfo (const juce::String& ckptPath);
 
 private:
     juce::String baseUrl;

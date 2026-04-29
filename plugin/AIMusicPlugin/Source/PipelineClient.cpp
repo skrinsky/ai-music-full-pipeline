@@ -77,13 +77,15 @@ bool PipelineClient::postProcess (const juce::String& audioFolder,
 bool PipelineClient::postTrain (const juce::String& eventsDir,
                                 const juce::String& ckptPath,
                                 const juce::String& device,
-                                int epochs)
+                                int epochs,
+                                int seqLen)
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty ("events_dir", eventsDir);
     obj->setProperty ("ckpt_path",  ckptPath);
     obj->setProperty ("device",     device);
     obj->setProperty ("epochs",     epochs);
+    obj->setProperty ("seq_len",    seqLen);
     auto resp = post ("/train", juce::JSON::toString (juce::var (obj)));
     return resp.contains ("started");
 }
@@ -94,24 +96,49 @@ juce::String PipelineClient::postGenerate (const juce::String& ckpt,
                                            float temperature,
                                            float topP,
                                            float tempoBpm,
-                                           int   forceGridStep,
-                                           int   maxTokens)
+                                           int   gridStraightStep,
+                                           int   gridTripletStep,
+                                           int   maxTokens,
+                                           bool  useSeed)
 {
     auto* obj = new juce::DynamicObject();
-    obj->setProperty ("ckpt",             ckpt);
-    obj->setProperty ("vocab_json",       vocabJson);
-    obj->setProperty ("seed_pkl",         seedPkl);
-    obj->setProperty ("temperature",      temperature);
-    obj->setProperty ("top_p",            topP);
-    obj->setProperty ("tempo_bpm",        tempoBpm);
-    obj->setProperty ("force_grid_step",  forceGridStep);
-    obj->setProperty ("max_tokens",       maxTokens);
+    obj->setProperty ("ckpt",               ckpt);
+    obj->setProperty ("vocab_json",         vocabJson);
+    obj->setProperty ("seed_pkl",           seedPkl);
+    obj->setProperty ("temperature",        temperature);
+    obj->setProperty ("top_p",              topP);
+    obj->setProperty ("tempo_bpm",          tempoBpm);
+    obj->setProperty ("grid_straight_step", gridStraightStep);
+    obj->setProperty ("grid_triplet_step",  gridTripletStep);
+    obj->setProperty ("max_tokens",         maxTokens);
+    obj->setProperty ("use_seed",           useSeed);
     auto resp = post ("/generate", juce::JSON::toString (juce::var (obj)));
     if (resp.isEmpty()) return {};
     auto json = juce::JSON::parse (resp);
     if (auto* parsed = json.getDynamicObject())
         return parsed->getProperty ("job_id").toString();
     return {};
+}
+
+bool PipelineClient::postCancel()
+{
+    auto* obj = new juce::DynamicObject();
+    auto resp = post ("/cancel", juce::JSON::toString (juce::var (obj)));
+    return resp.contains ("cancelled");
+}
+
+int PipelineClient::fetchCheckpointInfo (const juce::String& ckptPath)
+{
+    auto encoded = juce::URL::addEscapeChars (ckptPath, true);
+    auto resp = get ("/checkpoint_info?ckpt=" + encoded);
+    if (resp.isEmpty()) return 0;
+    auto json = juce::JSON::parse (resp);
+    if (auto* obj = json.getDynamicObject())
+    {
+        auto val = obj->getProperty ("seq_len");
+        if (! val.isVoid()) return (int) val;
+    }
+    return 0;
 }
 
 bool PipelineClient::fetchMidi (const juce::String& jobId, juce::MemoryBlock& midiData)

@@ -3,7 +3,8 @@
 #include "PluginProcessor.h"
 
 class AIMusicEditor : public juce::AudioProcessorEditor,
-                      private juce::Timer
+                      private juce::Timer,
+                      public juce::DragAndDropContainer
 {
 public:
     explicit AIMusicEditor (AIMusicProcessor&);
@@ -15,30 +16,58 @@ public:
 private:
     AIMusicProcessor& proc;
 
-    // Checkpoint path
-    juce::Label     lblCkpt;
-    juce::TextButton btnBrowseCkpt { "Browse" };
+    // ── Tab bar ──────────────────────────────────────────────────────────────
+    juce::TextButton tabProcess  { "Process & Train" };
+    juce::TextButton tabGenerate { "Generate" };
+    int currentTab { 0 };
 
-    // Generation knobs
-    juce::Slider sldTemperature, sldTopP, sldGridStep, sldMaxTokens, sldTempo;
-    juce::Label  lblTemperature, lblTopP, lblGridStep, lblMaxTokens, lblTempo;
-    juce::ToggleButton btnSyncTempo { "Sync" };
+    // ── Tab 1: Process & Train ────────────────────────────────────────────────
+    juce::Label        lblFolder;
+    juce::TextButton   btnBrowseFolder { "Select Audio Path" };
+    juce::Label        lblInstruments;
+    juce::ToggleButton chkLeadVox { "Lead Vox" };
+    juce::ToggleButton chkHarmVox { "Harm Vox" };
+    juce::ToggleButton chkGuitar  { "Guitar" };
+    juce::ToggleButton chkBass    { "Bass" };
+    juce::ToggleButton chkDrums   { "Drums" };
+    juce::ToggleButton chkOther   { "Other" };
+    juce::Slider       sldSeqLen;
+    juce::Label        lblSeqLen;
+    juce::TextButton   btnRunProcess { "Process Audio" };
+    juce::TextButton   btnTrain      { "Train" };
 
-    // Audio folder + actions
-    juce::Label     lblFolder;
-    juce::TextButton btnProcess  { "Process Audio" };
-    juce::TextButton btnTrain    { "Train" };
-    juce::TextButton btnGenerate { "Generate" };
+    // ── Tab 2: Generate ───────────────────────────────────────────────────────
+    juce::Label        lblCkpt;
+    juce::TextButton   btnBrowseCkpt  { "Select Model" };
+    juce::Slider       sldTemperature, sldTopP, sldMaxTokens, sldTempo;
+    juce::Label        lblTemperature, lblTopP, lblMaxTokens, lblTempo;
+    juce::ToggleButton btnSyncTempo   { "Sync" };
+    juce::ComboBox     cmbSubdivision;
+    juce::ToggleButton btnTriplets    { "Include Triplets" };
+    juce::Label        lblSubdivision;
+    juce::ToggleButton btnSeedFromData { "Seed from training data" };
+    juce::TextButton   btnGenerate    { "Generate" };
 
-    // Status
-    juce::Label lblStatus;
-    juce::Label lblMessage;
+    // ── Shared ────────────────────────────────────────────────────────────────
+    juce::TextButton btnCancel { "Cancel" };
+    juce::Label      lblStatus;
+    juce::Label      lblMessage;
+    juce::Label      lblTokenWarning;
     juce::TextButton btnShowMidi { "Show MIDI" };
-    juce::String lastMidiPath;
+    juce::String     lastMidiPath;
+
+    std::unique_ptr<juce::Component> mirrorAnim;
+    std::unique_ptr<juce::LookAndFeel> smallToggleLAF;
+    juce::String prevStage;
+    juce::String localErrorMessage;  // client-side errors that survive the server status poll
 
     void timerCallback() override;
+    void mouseDrag (const juce::MouseEvent&) override;
     void updateStatusLabel();
-    void chooseFolder();
+    void updateTokenWarning();
+    void updateTabVisibility();
+    juce::String buildTracksString() const;
+    void browseFolder (bool startAfterSelect = false);
     void browseCheckpoint();
     void makeKnob (juce::Slider&, double min, double max, double def, double step = 0.0);
 

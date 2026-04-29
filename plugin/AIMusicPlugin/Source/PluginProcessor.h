@@ -33,32 +33,44 @@ public:
     void startProcess (const juce::String& audioFolder);
     void startTrain();
     void startGenerate();
+    void cancelJob();
 
     // State the editor reads
     PipelineStatus lastStatus;
     juce::String   pendingJobId;
     juce::String   ckptPath;
     juce::String   audioFolder;
+    juce::String   selectedTracks;  // comma-separated demucs stems, empty = all
+    int            seqLen { 512 };
 
     // Generation parameters (owned by editor, read by processor on Generate)
     float  temperature    { 0.75f };
     float  topP           { 0.95f };
     float  tempoBpm       { 75.0f };
-    int    forceGridStep  { 6 };
+    int    gridSubdivision { 6 };   // straight step in ticks: 24=1/4, 12=1/8, 6=1/16, 3=1/32
+    bool   allowTriplets  { true };
     int    maxTokens      { 512 };
-    bool   syncTempo      { false };
+    bool   syncTempo      { true };
+    bool   seedFromData   { true };
 
-    double getHostBpm() const;
+    double getHostBpm() const { return cachedBpm.load(); }
+    int    loadCheckpointInfo();
+    bool   isTrainingDataReady();
+    juce::String getPref (const juce::String& key, const juce::String& fallback = {});
+    void         setPref (const juce::String& key, const juce::String& value);
 
     // MIDI to send out on next processBlock call (filled from background thread)
     juce::MidiBuffer pendingMidi;
     juce::CriticalSection midiLock;
 
+    std::atomic<double> cachedBpm { 120.0 };
+    int trainingCtxLen { 0 };
+
     std::function<void()> onStatusChanged;
 
 private:
     PipelineClient client;
-    std::unique_ptr<juce::ChildProcess> serverProcess;
+    juce::int64 lastServerLaunchMs { 0 };   // cooldown — don't re-launch within 15 s
     juce::ApplicationProperties appProperties;
 
     juce::PropertiesFile* getPrefs();

@@ -6,13 +6,15 @@ AIMusicProcessor::AIMusicProcessor()
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       client (7437)
 {
+    // Restore last-used audio folder so isTrainingDataReady() works without re-selecting
+    auto saved = getPref ("lastAudioDir");
+    if (saved.isNotEmpty()) audioFolder = saved;
 }
 
 AIMusicProcessor::~AIMusicProcessor()
 {
     stopTimer();
-    if (serverProcess != nullptr)
-        serverProcess->kill();
+    // Server is intentionally left running so jobs survive DAW close.
 }
 
 juce::File AIMusicProcessor::findRepoRoot (const juce::File& startDir)
@@ -34,24 +36,24 @@ void AIMusicProcessor::tryLaunchServerFromRepoRoot (const juce::File& repoRoot)
     auto serverScript = repoRoot.getChildFile ("plugin/server.py");
     if (! serverScript.existsAsFile()) return;
 
-    serverProcess = std::make_unique<juce::ChildProcess>();
+    auto q = [] (const juce::String& s) { return "\"" + s + "\""; };
 
     auto activate = repoRoot.getChildFile (".venv-ai-music/bin/activate");
+    juce::String shellCmd;
     if (activate.existsAsFile())
-    {
-        // Launch via bash so the venv activates properly — on macOS the Python.app
-        // framework doesn't pick up venv site-packages unless invoked through a shell.
-        auto q = [] (const juce::String& s) { return "\"" + s + "\""; };
-        auto shellCmd = ". " + q (activate.getFullPathName())
-                      + " && python " + q (serverScript.getFullPathName())
-                      + " --root "   + q (repoRoot.getFullPathName());
-        serverProcess->start ({ "/bin/bash", "-c", shellCmd });
-    }
+        shellCmd = ". " + q (activate.getFullPathName())
+                 + " && nohup python " + q (serverScript.getFullPathName())
+                 + " --root " + q (repoRoot.getFullPathName())
+                 + " > /dev/null 2>&1 &";
     else
-    {
-        serverProcess->start ({ "python3", serverScript.getFullPathName(),
-                                "--root", repoRoot.getFullPathName() });
-    }
+        shellCmd = "nohup python3 " + q (serverScript.getFullPathName())
+                 + " --root " + q (repoRoot.getFullPathName())
+                 + " > /dev/null 2>&1 &";
+
+    // Shell exits immediately after forking the server; server survives DAW close.
+    juce::ChildProcess shell;
+    shell.start ({ "/bin/bash", "-c", shellCmd });
+    shell.waitForProcessToFinish (3000);
 }
 
 juce::PropertiesFile* AIMusicProcessor::getPrefs()
@@ -70,6 +72,7 @@ juce::PropertiesFile* AIMusicProcessor::getPrefs()
 void AIMusicProcessor::launchServer()
 {
     if (client.isServerReachable()) return;
+    lastServerLaunchMs = juce::Time::currentTimeMillis();
 
     // 0. Compile-time path — always correct for dev builds
 #ifdef AI_REPO_ROOT
@@ -109,6 +112,12 @@ void AIMusicProcessor::launchServer()
 void AIMusicProcessor::processBlock (juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi)
 {
     audio.clear();
+
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+            if (auto bpm = pos->getBpm())
+                cachedBpm.store (*bpm);
+
     juce::ScopedLock sl (midiLock);
     if (! pendingMidi.isEmpty())
     {
@@ -143,7 +152,7 @@ void AIMusicProcessor::startProcess (const juce::String& folder)
             tryLaunchServerFromRepoRoot (repoRoot);
     }
 
-    client.postProcess (folder);
+    client.postProcess (folder, selectedTracks);
 }
 
 void AIMusicProcessor::startTrain()
@@ -153,28 +162,57 @@ void AIMusicProcessor::startTrain()
     auto eventsDir  = repoRoot2.exists()
                           ? repoRoot2.getChildFile ("runs/events").getFullPathName()
                           : juce::String ("runs/events");
-    client.postTrain (eventsDir,
-                      ckptPath, "auto", 200);
-}
-
-double AIMusicProcessor::getHostBpm() const
-{
-    if (auto* ph = getPlayHead())
-    {
-        if (auto pos = ph->getPosition())
-            if (auto bpm = pos->getBpm())
-                return *bpm;
-    }
-    return 120.0;
+    client.postTrain (eventsDir, ckptPath, "auto", 200, seqLen);
 }
 
 void AIMusicProcessor::startGenerate()
 {
     float bpm = syncTempo ? (float) getHostBpm() : tempoBpm;
-    // Pass empty vocab_json — the server searches all known event directories.
+    int tripletStep = allowTriplets ? (gridSubdivision * 2 / 3) : 0;
     pendingJobId = client.postGenerate (ckptPath, {}, {},
                                         temperature, topP, bpm,
-                                        forceGridStep, maxTokens);
+                                        gridSubdivision, tripletStep, maxTokens,
+                                        seedFromData);
+}
+
+juce::String AIMusicProcessor::getPref (const juce::String& key, const juce::String& fallback)
+{
+    if (auto* p = getPrefs()) return p->getValue (key, fallback);
+    return fallback;
+}
+
+void AIMusicProcessor::setPref (const juce::String& key, const juce::String& value)
+{
+    if (auto* p = getPrefs()) { p->setValue (key, value); p->saveIfNeeded(); }
+}
+
+bool AIMusicProcessor::isTrainingDataReady()
+{
+    // Only use paths explicitly set this session — no pref fallback here.
+    // audioFolder is restored from prefs on startup so returning users still work.
+    juce::File startDir;
+    if      (audioFolder.isNotEmpty()) startDir = juce::File (audioFolder);
+    else if (ckptPath.isNotEmpty())    startDir = juce::File (ckptPath).getParentDirectory();
+    else return false;
+
+    auto repoRoot = findRepoRoot (startDir);
+    if (! repoRoot.exists()) return false;
+
+    auto eventsDir = repoRoot.getChildFile ("runs/events");
+    return eventsDir.getChildFile ("events_train.pkl").existsAsFile()
+        && eventsDir.getChildFile ("events_val.pkl").existsAsFile();
+}
+
+int AIMusicProcessor::loadCheckpointInfo()
+{
+    trainingCtxLen = client.fetchCheckpointInfo (ckptPath);
+    return trainingCtxLen;
+}
+
+void AIMusicProcessor::cancelJob()
+{
+    client.postCancel();
+    pendingJobId.clear();
 }
 
 // ── timer: poll status + MIDI ─────────────────────────────────────────────────
@@ -183,10 +221,9 @@ void AIMusicProcessor::timerCallback()
 {
     if (! client.isServerReachable())
     {
-        // Clear a dead process handle so launchServer() can run again
-        if (serverProcess != nullptr && ! serverProcess->isRunning())
-            serverProcess = nullptr;
-        if (serverProcess == nullptr)
+        // Relaunch at most once every 15 s — gives detached server time to start up
+        auto nowMs = juce::Time::currentTimeMillis();
+        if (nowMs - lastServerLaunchMs > 15000)
             launchServer();
     }
 

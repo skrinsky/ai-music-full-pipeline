@@ -179,6 +179,8 @@ def get_args():
                     help="Fallback grid step if pulse detection hasn't fired yet. 6=1/16 note.")
     ap.add_argument("--force_grid_step", type=int, default=0,
                     help="Force a fixed grid step, bypassing auto-detection. 6=1/16, 8=1/8-triplet, 12=1/8. 0=auto.")
+    ap.add_argument("--grid_triplet_step", type=int, default=0,
+                    help="When >0, snap each TIME_SHIFT to whichever of force_grid_step or this is closer. E.g. force_grid_step=6 + grid_triplet_step=4 allows 1/16 and 1/16-triplet.")
     ap.add_argument("--grid_detect_window", type=int, default=24,
                     help="How many TIME_SHIFT deltas to collect before locking pulse, and window for re-detection.")
     ap.add_argument("--grid_lock_tokens", type=int, default=96,
@@ -791,8 +793,15 @@ def generate(args):
                         grid_step = best_step
                         grid_last_flip_at = len(seq)
 
-                snapped = nearest_multiple(raw_delta, grid_step)
-                snapped = max(grid_step, min(int(snapped), int(max_delta_steps)))
+                if args.grid_triplet_step > 0:
+                    snapped_s = nearest_multiple(raw_delta, grid_step)
+                    snapped_t = nearest_multiple(raw_delta, args.grid_triplet_step)
+                    snapped = snapped_s if abs(snapped_s - raw_delta) <= abs(snapped_t - raw_delta) else snapped_t
+                    min_step = min(grid_step, args.grid_triplet_step)
+                else:
+                    snapped = nearest_multiple(raw_delta, grid_step)
+                    min_step = grid_step
+                snapped = max(min_step, min(int(snapped), int(max_delta_steps)))
                 val_local = int(snapped - 1)
 
         global_id = starts[type_name] + int(val_local)
