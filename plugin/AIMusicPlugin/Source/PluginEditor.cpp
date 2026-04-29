@@ -11,9 +11,11 @@ struct MirrorMirror : public juce::Component, private juce::Timer
     bool  isError        = false;
     int   errorHoldFrames { 0 };   // counts down after error clears, giving a delay
     float nodPhase       { -1.f }; // -1 = inactive; ≥0 = nod in progress
+    float shakePhase     { -1.f }; // -1 = inactive; ≥0 = head-shake (error)
     float celebPhase     { -1.f }; // -1 = inactive; ≥0 = celebration burst + wink
 
     void triggerNod()         { nodPhase   = 0.f; }
+    void triggerShake()       { shakePhase = 0.f; }
     void triggerCelebration() { celebPhase = 0.f; }
 
     MirrorMirror()  { startTimerHz (24); }
@@ -128,11 +130,16 @@ struct MirrorMirror : public juce::Component, private juce::Timer
         float vis = 0.55f + 0.40f * std::sin (phase * 0.28f);
         float es  = srx * 0.17f;
 
-        // Nod offset: damped sine — multiple back-and-forth nods, ~5s decay
+        // Nod (up-down) and shake (left-right): damped sine, same envelope
         float nodY = 0.f;
         if (nodPhase >= 0.f)
             nodY = sry * 0.28f * std::sin (nodPhase * 3.5f)
                                * std::exp  (-nodPhase * 0.28f);
+        float shakeX = 0.f;
+        if (shakePhase >= 0.f)
+            shakeX = srx * 0.28f * std::sin (shakePhase * 3.5f)
+                                 * std::exp  (-shakePhase * 0.28f);
+        float fcx = scx + shakeX;  // face center x — shifts left-right on shake
 
         float ey  = scy - sry * 0.14f + nodY;
         float ex  = srx * 0.30f;
@@ -157,28 +164,28 @@ struct MirrorMirror : public juce::Component, private juce::Timer
 
         // ── left eye (never winks) ────────────────────────────────────────────
         g.setColour (juce::Colour (0xff4488ff).withAlpha (vis * 0.35f));
-        g.fillEllipse (scx - ex - es * 2.2f, ey - es * 2.2f, es * 4.4f, es * 4.4f);
+        g.fillEllipse (fcx - ex - es * 2.2f, ey - es * 2.2f, es * 4.4f, es * 4.4f);
         g.setColour (juce::Colour (0xffaaddff).withAlpha (vis));
-        g.fillEllipse (scx - ex - es, ey - es, es * 2.f, es * 2.f);
+        g.fillEllipse (fcx - ex - es, ey - es, es * 2.f, es * 2.f);
         g.setColour (juce::Colour (0xff0a1a2e).withAlpha (vis * 0.95f));
         {
-            auto lOff = pupilOff (scx - ex, ey);
-            g.fillEllipse (scx - ex + lOff.x - ps, ey + lOff.y - ps, ps * 2.f, ps * 2.f);
+            auto lOff = pupilOff (fcx - ex, ey);
+            g.fillEllipse (fcx - ex + lOff.x - ps, ey + lOff.y - ps, ps * 2.f, ps * 2.f);
         }
 
         // ── right eye (squishes closed on wink) ───────────────────────────────
         float rEyeHScale = 1.f - winkClose * 0.96f;
         g.setColour (juce::Colour (0xff4488ff).withAlpha (vis * 0.35f));
-        g.fillEllipse (scx + ex - es * 2.2f, ey - es * 2.2f * rEyeHScale,
+        g.fillEllipse (fcx + ex - es * 2.2f, ey - es * 2.2f * rEyeHScale,
                        es * 4.4f,             es * 4.4f * rEyeHScale);
         g.setColour (juce::Colour (0xffaaddff).withAlpha (vis));
-        g.fillEllipse (scx + ex - es, ey - es * rEyeHScale,
+        g.fillEllipse (fcx + ex - es, ey - es * rEyeHScale,
                        es * 2.f,      es * 2.f * rEyeHScale);
         if (rEyeHScale > 0.12f)   // pupil disappears as eye closes
         {
             g.setColour (juce::Colour (0xff0a1a2e).withAlpha (vis * 0.95f));
-            auto rOff = pupilOff (scx + ex, ey);
-            g.fillEllipse (scx + ex + rOff.x - ps,
+            auto rOff = pupilOff (fcx + ex, ey);
+            g.fillEllipse (fcx + ex + rOff.x - ps,
                            ey + rOff.y - ps * rEyeHScale,
                            ps * 2.f, ps * 2.f * rEyeHScale);
         }
@@ -187,8 +194,8 @@ struct MirrorMirror : public juce::Component, private juce::Timer
         {
             float lidVis = (winkClose - 0.45f) / 0.55f;
             juce::Path lid;
-            lid.startNewSubPath (scx + ex - es, ey);
-            lid.quadraticTo     (scx + ex,      ey - es * 0.55f, scx + ex + es, ey);
+            lid.startNewSubPath (fcx + ex - es, ey);
+            lid.quadraticTo     (fcx + ex,      ey - es * 0.55f, fcx + ex + es, ey);
             g.setColour (juce::Colour (0xffcceeFF).withAlpha (vis * lidVis * 0.85f));
             g.strokePath (lid, juce::PathStrokeType (1.3f));
         }
@@ -206,29 +213,29 @@ struct MirrorMirror : public juce::Component, private juce::Timer
             {
                 // ── deep void interior ─────────────────────────────────────
                 g.setColour (juce::Colour (0xff010408).withAlpha (vis * errScale));
-                g.fillEllipse (scx - omw, fmy - omh * 0.5f, omw * 2.f, omh * 2.f);
+                g.fillEllipse (fcx - omw, fmy - omh * 0.5f, omw * 2.f, omh * 2.f);
 
                 // ── violet swirl — pulses at a different rate ──────────────
                 float swirl = 0.45f + 0.40f * std::sin (phase * 3.1f);
                 g.setColour (juce::Colour (0xff9922ee).withAlpha (vis * swirl * 0.55f * mouthOpen * errScale));
-                g.fillEllipse (scx - omw * 0.58f, fmy - omh * 0.40f,
+                g.fillEllipse (fcx - omw * 0.58f, fmy - omh * 0.40f,
                                omw * 1.16f, omh * 0.80f);
 
                 // ── bright inner rim ───────────────────────────────────────
                 g.setColour (juce::Colour (0xff99ddff).withAlpha (vis * mouthOpen * errScale));
-                g.drawEllipse (scx - omw, fmy - omh * 0.5f,
+                g.drawEllipse (fcx - omw, fmy - omh * 0.5f,
                                omw * 2.f, omh * 2.f, 1.6f);
 
                 // ── outer aura ring ────────────────────────────────────────
                 g.setColour (juce::Colour (0xff5533cc).withAlpha (vis * mouthOpen * 0.45f * errScale));
-                g.drawEllipse (scx - omw - 2.f, fmy - omh * 0.5f - 1.2f,
+                g.drawEllipse (fcx - omw - 2.f, fmy - omh * 0.5f - 1.2f,
                                omw * 2.f + 4.f, omh * 2.f + 2.4f, 2.8f);
             }
             else
             {
                 // Almost-closed — thin line so it doesn't snap to smile
                 g.setColour (juce::Colour (0xff88bbff).withAlpha (vis * 0.30f * errScale));
-                g.drawLine (scx - omw * 0.5f, fmy, scx + omw * 0.5f, fmy, 1.0f);
+                g.drawLine (fcx - omw * 0.5f, fmy, fcx + omw * 0.5f, fmy, 1.0f);
             }
         }
         else
@@ -236,8 +243,8 @@ struct MirrorMirror : public juce::Component, private juce::Timer
             // Normal smile arc
             juce::Path mouth;
             float mw = srx * 0.40f;
-            mouth.startNewSubPath (scx - mw, fmy);
-            mouth.quadraticTo (scx, fmy + sry * 0.16f, scx + mw, fmy);
+            mouth.startNewSubPath (fcx - mw, fmy);
+            mouth.quadraticTo (fcx, fmy + sry * 0.16f, fcx + mw, fmy);
             g.setColour (juce::Colour (0xff88bbff).withAlpha (vis * 0.65f));
             g.strokePath (mouth, juce::PathStrokeType (1.2f));
         }
@@ -325,36 +332,245 @@ struct MirrorMirror : public juce::Component, private juce::Timer
             nodPhase += 0.065f;
             if (nodPhase > 12.0f) nodPhase = -1.f;
         }
+        if (shakePhase >= 0.f)
+        {
+            shakePhase += 0.065f;
+            if (shakePhase > 12.0f) shakePhase = -1.f;
+        }
         if (celebPhase >= 0.f)
         {
             celebPhase += 0.065f;
             if (celebPhase > 5.0f) celebPhase = -1.f;
         }
-        // Drive title-sparkle animation in the parent editor
+        // Drive all animated painting in the parent editor (title sparkles + button pulses)
         if (auto* parent = getParentComponent())
-            parent->repaint (0, 0, parent->getWidth(), 38);
+            parent->repaint();
         repaint();
     }
 };
 
-// Small-font LookAndFeel for cramped toggle buttons — draws an X instead of a tick
+// ── Eye knob — used for the lone Seq Len knob on the Process & Train tab ─────
+struct MirrorEyeKnobLAF : public juce::LookAndFeel_V4
+{
+    void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                           float sliderPos, float startAngle, float endAngle,
+                           juce::Slider&) override
+    {
+        auto constexpr twoPi  = juce::MathConstants<float>::twoPi;
+
+        float cx = x + width  * 0.5f;
+        float cy = y + height * 0.5f;
+        float r  = std::min (width, height) * 0.5f - 3.f;
+        if (r < 5.f) return;
+
+        // Same outer purple glow as orb knobs
+        g.setColour (juce::Colour (0xff6633cc).withAlpha (0.22f));
+        g.fillEllipse (cx - r - 4.f, cy - r - 4.f, (r + 4.f) * 2.f, (r + 4.f) * 2.f);
+
+        // Same gold frame gradient — visual family connection
+        juce::ColourGradient frameGrad (
+            juce::Colour (0xffFFE566), cx, cy - r,
+            juce::Colour (0xff7A4E00), cx, cy + r, false);
+        frameGrad.addColour (0.30, juce::Colour (0xffFFD700));
+        frameGrad.addColour (0.70, juce::Colour (0xffCE9E22));
+        g.setGradientFill (frameGrad);
+        g.fillEllipse (cx - r, cy - r, r * 2.f, r * 2.f);
+
+        // ── Iris surface ───────────────────────��──────────────────────────────
+        float sr = r - 5.f;
+        juce::ColourGradient irisBase (
+            juce::Colour (0xff0d0510), cx, cy - sr,
+            juce::Colour (0xff1e0a28), cx, cy + sr, false);
+        g.setGradientFill (irisBase);
+        g.fillEllipse (cx - sr, cy - sr, sr * 2.f, sr * 2.f);
+
+        // Radial striations — thin rays from pupil edge outward
+        int nRays = 36;
+        for (int i = 0; i < nRays; ++i)
+        {
+            float a      = i * twoPi / nRays;
+            float inner  = sr * 0.30f;
+            bool  major  = (i % 3 == 0);
+            float outer  = sr * (major ? 0.96f : 0.88f);
+            float thick  = major ? 0.9f : 0.5f;
+            float alpha  = major ? 0.38f : 0.18f;
+            g.setColour (juce::Colour (0xffB8860B).withAlpha (alpha));
+            g.drawLine (cx + std::cos (a) * inner, cy + std::sin (a) * inner,
+                        cx + std::cos (a) * outer, cy + std::sin (a) * outer, thick);
+        }
+
+        // Collarette ring (just outside pupil — like real iris anatomy)
+        float colR = sr * 0.36f;
+        g.setColour (juce::Colour (0xffCE9E22).withAlpha (0.25f));
+        g.drawEllipse (cx - colR, cy - colR, colR * 2.f, colR * 2.f, 1.0f);
+
+        // Outer limbal shadow (darkens the iris rim, like a real eye)
+        g.setColour (juce::Colour (0xff000000).withAlpha (0.30f));
+        g.drawEllipse (cx - sr + 1.f, cy - sr + 1.f, (sr - 1.f) * 2.f, (sr - 1.f) * 2.f, 3.0f);
+
+        // ── Pupil ─────────────────────────────────────────────────────────────
+        float pr = sr * 0.28f;
+        g.setColour (juce::Colour (0xff030108));
+        g.fillEllipse (cx - pr, cy - pr, pr * 2.f, pr * 2.f);
+        // Deep purple core glow
+        g.setColour (juce::Colour (0xff7711cc).withAlpha (0.60f));
+        g.fillEllipse (cx - pr * 0.75f, cy - pr * 0.75f, pr * 1.5f, pr * 1.5f);
+        // Bright inner spark
+        g.setColour (juce::Colour (0xff99bbff).withAlpha (0.40f));
+        g.fillEllipse (cx - pr * 0.38f, cy - pr * 0.38f, pr * 0.75f, pr * 0.75f);
+
+        // ── Value pointer — gold spoke from pupil edge to iris ────────────────
+        float curAngle = startAngle + (endAngle - startAngle) * sliderPos;
+        float si = pr * 1.05f,  so = sr * 0.87f;
+        float sx1 = cx + std::sin (curAngle) * si,  sy1 = cy - std::cos (curAngle) * si;
+        float sx2 = cx + std::sin (curAngle) * so,  sy2 = cy - std::cos (curAngle) * so;
+        // Glow
+        g.setColour (juce::Colour (0xffFFD700).withAlpha (0.22f));
+        g.drawLine (sx1, sy1, sx2, sy2, 4.2f);
+        // Bright spoke
+        g.setColour (juce::Colour (0xffFFEE88).withAlpha (0.92f));
+        g.drawLine (sx1, sy1, sx2, sy2, 1.2f);
+        // Tip dot
+        g.setColour (juce::Colours::white.withAlpha (0.85f));
+        g.fillEllipse (sx2 - 2.f, sy2 - 2.f, 4.f, 4.f);
+
+        // ── Specular glint (light catching the eye surface) ───────────────────
+        g.setColour (juce::Colours::white.withAlpha (0.50f));
+        g.fillEllipse (cx - sr * 0.28f, cy - sr * 0.62f, sr * 0.22f, sr * 0.11f);
+        g.setColour (juce::Colours::white.withAlpha (0.20f));
+        g.fillEllipse (cx - sr * 0.16f, cy - sr * 0.50f, sr * 0.11f, sr * 0.07f);
+    }
+};
+
+// ── Magical knob LookAndFeel ─────────────────────────────────────────────────
+struct MirrorKnobLAF : public juce::LookAndFeel_V4
+{
+    void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                           float sliderPos, float startAngle, float endAngle,
+                           juce::Slider&) override
+    {
+        auto constexpr twoPi  = juce::MathConstants<float>::twoPi;
+        auto constexpr halfPi = juce::MathConstants<float>::halfPi;
+
+        float cx = x + width  * 0.5f;
+        float cy = y + height * 0.5f;
+        float r  = std::min (width, height) * 0.5f - 3.f;
+        if (r < 5.f) return;
+
+        // outer purple glow
+        g.setColour (juce::Colour (0xff6633cc).withAlpha (0.22f));
+        g.fillEllipse (cx - r - 4.f, cy - r - 4.f, (r + 4.f) * 2.f, (r + 4.f) * 2.f);
+
+        // gold frame
+        juce::ColourGradient frameGrad (
+            juce::Colour (0xffFFE566), cx, cy - r,
+            juce::Colour (0xff7A4E00), cx, cy + r, false);
+        frameGrad.addColour (0.30, juce::Colour (0xffFFD700));
+        frameGrad.addColour (0.70, juce::Colour (0xffCE9E22));
+        g.setGradientFill (frameGrad);
+        g.fillEllipse (cx - r, cy - r, r * 2.f, r * 2.f);
+
+        // dark magical surface
+        float sr = r - 5.f;
+        juce::ColourGradient surf (
+            juce::Colour (0xff1a0a38), cx - sr * 0.3f, cy - sr,
+            juce::Colour (0xff091525), cx, cy + sr, false);
+        surf.addColour (0.45, juce::Colour (0xff23104a));
+        g.setGradientFill (surf);
+        g.fillEllipse (cx - sr, cy - sr, sr * 2.f, sr * 2.f);
+
+        // shimmer highlight
+        g.setColour (juce::Colours::white.withAlpha (0.05f));
+        g.fillEllipse (cx - sr * 0.18f, cy - sr * 0.92f, sr * 0.44f, sr * 1.3f);
+
+        // inner bevel
+        g.setColour (juce::Colour (0xff2a1800).withAlpha (0.4f));
+        g.drawEllipse (cx - sr, cy - sr, sr * 2.f, sr * 2.f, 1.5f);
+
+        // gem dots around frame
+        g.setColour (juce::Colour (0xff8A5E00));
+        g.drawEllipse (cx - r + 0.8f, cy - r + 0.8f, (r - 0.8f) * 2.f, (r - 0.8f) * 2.f, 0.8f);
+        for (int i = 0; i < 8; ++i)
+        {
+            float a  = i * twoPi / 8.f - halfPi;
+            float px = cx + std::cos (a) * (r - 3.f);
+            float py = cy + std::sin (a) * (r - 3.f);
+            bool  big = (i % 2 == 0);
+            g.setColour (big ? juce::Colour (0xffFFEE44) : juce::Colour (0xffAA8800));
+            float dr = big ? 2.2f : 1.5f;
+            g.fillEllipse (px - dr, py - dr, dr * 2.f, dr * 2.f);
+        }
+
+        // track arc (dim)
+        float arcR = sr - 2.5f;
+        {
+            juce::Path track;
+            track.addArc (cx - arcR, cy - arcR, arcR * 2.f, arcR * 2.f,
+                          startAngle, endAngle, true);
+            g.setColour (juce::Colour (0xff4433aa).withAlpha (0.30f));
+            g.strokePath (track, juce::PathStrokeType (1.5f, juce::PathStrokeType::curved,
+                                                        juce::PathStrokeType::rounded));
+        }
+
+        // value arc — glow
+        float curAngle = startAngle + (endAngle - startAngle) * sliderPos;
+        if (sliderPos > 0.001f)
+        {
+            juce::Path val;
+            val.addArc (cx - arcR, cy - arcR, arcR * 2.f, arcR * 2.f,
+                        startAngle, curAngle, true);
+            // soft halo
+            g.setColour (juce::Colour (0xffaaddff).withAlpha (0.30f));
+            g.strokePath (val, juce::PathStrokeType (3.8f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+            // bright core
+            g.setColour (juce::Colour (0xff89b4fa).withAlpha (0.85f));
+            g.strokePath (val, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+        }
+
+        // pointer orb
+        float dotR = sr * 0.60f;
+        float dotX = cx + std::sin (curAngle) * dotR;
+        float dotY = cy - std::cos (curAngle) * dotR;
+        g.setColour (juce::Colour (0xff89b4fa).withAlpha (0.35f));
+        g.fillEllipse (dotX - 5.5f, dotY - 5.5f, 11.f, 11.f);
+        g.setColour (juce::Colour (0xffcce8ff).withAlpha (0.95f));
+        g.fillEllipse (dotX - 2.8f, dotY - 2.8f, 5.6f, 5.6f);
+        g.setColour (juce::Colours::white.withAlpha (0.90f));
+        g.fillEllipse (dotX - 1.4f, dotY - 1.4f, 2.8f, 2.8f);
+    }
+};
+
+// ── Magical toggle buttons — glowing orb instead of a tick box ───────────────
 struct SmallToggleLAF : public juce::LookAndFeel_V4
 {
-    void drawTickBox (juce::Graphics& g, juce::Component& component,
+    void drawTickBox (juce::Graphics& g, juce::Component& /*component*/,
                       float x, float y, float w, float h,
                       bool ticked, bool isEnabled,
                       bool /*highlighted*/, bool /*down*/) override
     {
-        juce::ignoreUnused (isEnabled);
-        auto box = juce::Rectangle<float> (x, y, w, h);
-        g.setColour (component.findColour (juce::ToggleButton::tickDisabledColourId));
-        g.drawRoundedRectangle (box, 2.0f, 1.0f);
+        float cx = x + w * 0.5f, cy = y + h * 0.5f;
+        float r  = std::min (w, h) * 0.5f - 0.5f;
+
+        // Outer ring — dim gold, brightens when checked
+        g.setColour (juce::Colour (ticked ? 0xffFFD700u : 0xffCE9E22u)
+                         .withAlpha (isEnabled ? (ticked ? 0.80f : 0.42f) : 0.20f));
+        g.drawEllipse (cx - r, cy - r, r * 2.f, r * 2.f, 1.1f);
+
         if (ticked)
         {
-            g.setColour (component.findColour (juce::ToggleButton::tickColourId));
-            auto inset = box.reduced (3.0f);
-            g.drawLine (inset.getX(), inset.getY(), inset.getRight(), inset.getBottom(), 1.5f);
-            g.drawLine (inset.getRight(), inset.getY(), inset.getX(), inset.getBottom(), 1.5f);
+            // Soft glow fill
+            g.setColour (juce::Colour (0xff89b4fa).withAlpha (0.18f));
+            g.fillEllipse (cx - r, cy - r, r * 2.f, r * 2.f);
+            // Bright inner orb
+            float ir = r * 0.62f;
+            g.setColour (juce::Colour (0xffaaddff).withAlpha (isEnabled ? 0.90f : 0.40f));
+            g.fillEllipse (cx - ir, cy - ir, ir * 2.f, ir * 2.f);
+            // White highlight
+            float cr = ir * 0.42f;
+            g.setColour (juce::Colours::white.withAlpha (0.80f));
+            g.fillEllipse (cx - cr, cy - cr, cr * 2.f, cr * 2.f);
         }
     }
 
@@ -366,9 +582,10 @@ struct SmallToggleLAF : public juce::LookAndFeel_V4
         drawTickBox (g, btn, 4.0f, ((float) btn.getHeight() - tickWidth) * 0.5f,
                      tickWidth, tickWidth,
                      btn.getToggleState(), btn.isEnabled(), highlighted, down);
-        g.setColour (btn.findColour (juce::ToggleButton::textColourId));
+        auto col = btn.findColour (juce::ToggleButton::textColourId);
+        if (! btn.isEnabled()) col = col.withAlpha (0.45f);
+        g.setColour (col);
         g.setFont (fontSize);
-        if (! btn.isEnabled()) g.setOpacity (0.5f);
         g.drawFittedText (btn.getButtonText(),
                           btn.getLocalBounds()
                              .withTrimmedLeft (juce::roundToInt (tickWidth) + 10)
@@ -377,18 +594,172 @@ struct SmallToggleLAF : public juce::LookAndFeel_V4
     }
 };
 
+// ── Magical UI LookAndFeel — buttons, combo boxes, popup menus ────────────────
+struct MirrorUILAF : public juce::LookAndFeel_V4
+{
+    MirrorUILAF()
+    {
+        setColour (juce::TextButton::textColourOffId,        kFg);
+        setColour (juce::TextButton::textColourOnId,         juce::Colour (0xffFFEE88));
+        setColour (juce::ComboBox::textColourId,             kFg);
+        setColour (juce::PopupMenu::textColourId,            kFg);
+        setColour (juce::PopupMenu::backgroundColourId,      juce::Colour (0xff130820));
+        setColour (juce::PopupMenu::highlightedBackgroundColourId, juce::Colour (0xff6633cc));
+    }
+
+    // ── TextButton ────────────────────────────────────────────────────────────
+    void drawButtonBackground (juce::Graphics& g, juce::Button& btn,
+                                const juce::Colour& bgColour,
+                                bool highlighted, bool down) override
+    {
+        auto b = btn.getLocalBounds().toFloat().reduced (0.5f);
+        constexpr float corner = 5.f;
+
+        // Dark magical base gradient
+        juce::ColourGradient base (
+            juce::Colour (0xff1e1040), b.getCentreX(), b.getY(),
+            juce::Colour (0xff0c0818), b.getCentreX(), b.getBottom(), false);
+        g.setGradientFill (base);
+        g.fillRoundedRectangle (b, corner);
+
+        // Low-alpha tint = accent overlay (e.g., active tab — set via setColour)
+        if (bgColour.getAlpha() < 200)
+        {
+            g.setColour (bgColour);
+            g.fillRoundedRectangle (b, corner);
+        }
+
+        // Hover / press purple wash
+        if (highlighted || down)
+        {
+            g.setColour (juce::Colour (0xff6633cc).withAlpha (down ? 0.28f : 0.14f));
+            g.fillRoundedRectangle (b, corner);
+        }
+
+        // Gold border — dims when idle, brightens on hover
+        float ba = down ? 1.0f : (highlighted ? 0.80f : 0.40f);
+        juce::ColourGradient border (
+            juce::Colour (0xffFFE566).withAlpha (ba), b.getCentreX(), b.getY(),
+            juce::Colour (0xff9A6B00).withAlpha (ba), b.getCentreX(), b.getBottom(), false);
+        border.addColour (0.5, juce::Colour (0xffFFD700).withAlpha (ba));
+        g.setGradientFill (border);
+        g.drawRoundedRectangle (b, corner, 1.0f);
+    }
+
+    void drawButtonText (juce::Graphics& g, juce::TextButton& btn,
+                          bool highlighted, bool /*down*/) override
+    {
+        auto col = btn.findColour (btn.getToggleState() ? juce::TextButton::textColourOnId
+                                                        : juce::TextButton::textColourOffId);
+        if (! btn.isEnabled()) col = col.withAlpha (0.40f);
+        else if (highlighted)  col = col.brighter (0.25f);
+        g.setColour (col);
+        g.setFont (juce::Font (12.5f));
+        g.drawFittedText (btn.getButtonText(),
+                          btn.getLocalBounds().reduced (4, 0),
+                          juce::Justification::centred, 2);
+    }
+
+    // ── ComboBox ──────────────────────────────────────────────────────────────
+    void drawComboBox (juce::Graphics& g, int width, int height, bool /*isDown*/,
+                        int /*bx*/, int /*by*/, int /*bw*/, int /*bh*/,
+                        juce::ComboBox& /*box*/) override
+    {
+        auto b = juce::Rectangle<float> (0.f, 0.f, (float) width, (float) height).reduced (0.5f);
+        constexpr float corner = 4.f;
+
+        juce::ColourGradient base (
+            juce::Colour (0xff1e1040), b.getCentreX(), b.getY(),
+            juce::Colour (0xff0c0818), b.getCentreX(), b.getBottom(), false);
+        g.setGradientFill (base);
+        g.fillRoundedRectangle (b, corner);
+
+        juce::ColourGradient border (
+            juce::Colour (0xffFFE566).withAlpha (0.50f), b.getCentreX(), b.getY(),
+            juce::Colour (0xff9A6B00).withAlpha (0.50f), b.getCentreX(), b.getBottom(), false);
+        g.setGradientFill (border);
+        g.drawRoundedRectangle (b, corner, 1.0f);
+
+        // Gold chevron arrow
+        float ax = (float) width - 14.f, ay = (float) height * 0.5f;
+        juce::Path arrow;
+        arrow.startNewSubPath (ax - 4.5f, ay - 3.f);
+        arrow.lineTo           (ax,        ay + 3.f);
+        arrow.lineTo           (ax + 4.5f, ay - 3.f);
+        g.setColour (juce::Colour (0xffFFD700).withAlpha (0.85f));
+        g.strokePath (arrow, juce::PathStrokeType (1.4f, juce::PathStrokeType::mitered,
+                                                    juce::PathStrokeType::square));
+    }
+
+    juce::Font getComboBoxFont (juce::ComboBox&) override { return juce::Font (12.f); }
+
+    // ── Popup menu ────────────────────────────────────────────────────────────
+    void drawPopupMenuBackground (juce::Graphics& g, int width, int height) override
+    {
+        auto b = juce::Rectangle<float> (0.f, 0.f, (float) width, (float) height);
+        g.setColour (juce::Colour (0xff130820));
+        g.fillRoundedRectangle (b, 4.f);
+        g.setColour (juce::Colour (0xffFFD700).withAlpha (0.38f));
+        g.drawRoundedRectangle (b.reduced (0.5f), 4.f, 1.f);
+    }
+
+    void drawPopupMenuItem (juce::Graphics& g, const juce::Rectangle<int>& area,
+                             bool isSeparator, bool isActive, bool isHighlighted,
+                             bool isTicked, bool /*hasSubMenu*/,
+                             const juce::String& text, const juce::String& /*shortcut*/,
+                             const juce::Drawable* /*icon*/,
+                             const juce::Colour* /*textCol*/) override
+    {
+        if (isSeparator)
+        {
+            g.setColour (juce::Colour (0xffFFD700).withAlpha (0.18f));
+            g.drawHorizontalLine (area.getCentreY(),
+                                  (float) area.getX() + 4.f, (float) area.getRight() - 4.f);
+            return;
+        }
+
+        if (isHighlighted)
+        {
+            g.setColour (juce::Colour (0xff6633cc).withAlpha (0.32f));
+            g.fillRoundedRectangle (area.toFloat().reduced (2.f, 1.f), 3.f);
+            g.setColour (juce::Colour (0xffFFD700).withAlpha (0.18f));
+            g.drawRoundedRectangle (area.toFloat().reduced (2.f, 1.f), 3.f, 0.7f);
+        }
+
+        auto col = isHighlighted ? juce::Colour (0xffFFEE88) : kFg;
+        if (! isActive) col = col.withAlpha (0.40f);
+        g.setColour (col);
+        g.setFont (juce::Font (12.f));
+        g.drawFittedText (text, area.reduced (8, 0), juce::Justification::centredLeft, 1);
+
+        // Gold dot for the ticked (currently selected) item
+        if (isTicked)
+        {
+            float cx = (float) area.getRight() - 12.f;
+            float cy = (float) area.getCentreY();
+            g.setColour (juce::Colour (0xff89b4fa).withAlpha (0.35f));
+            g.fillEllipse (cx - 4.f, cy - 4.f, 8.f, 8.f);
+            g.setColour (juce::Colour (0xffFFD700).withAlpha (0.90f));
+            g.fillEllipse (cx - 2.5f, cy - 2.5f, 5.f, 5.f);
+        }
+    }
+
+    juce::Font getPopupMenuFont() override { return juce::Font (12.f); }
+};
+
 AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     : AudioProcessorEditor (&p), proc (p),
-      mirrorAnim    (std::make_unique<MirrorMirror>()),
-      smallToggleLAF (std::make_unique<SmallToggleLAF>())
+      mirrorAnim     (std::make_unique<MirrorMirror>()),
+      mirrorUILAF       (std::make_unique<MirrorUILAF>()),
+      smallToggleLAF    (std::make_unique<SmallToggleLAF>()),
+      mirrorKnobLAF     (std::make_unique<MirrorKnobLAF>())
 {
     setSize (480, 440);
+    setLookAndFeel (mirrorUILAF.get());   // global — cascades to all children without explicit LAF
     addAndMakeVisible (*mirrorAnim);
 
     // ── Tab bar ───────────────────────────────────────────────────────────────
     auto styleTab = [&] (juce::TextButton& btn) {
-        btn.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff313244));
-        btn.setColour (juce::TextButton::textColourOffId, kFg);
         addAndMakeVisible (btn);
     };
     styleTab (tabProcess);
@@ -423,10 +794,6 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
         chk->setLookAndFeel (smallToggleLAF.get());
         addAndMakeVisible (chk);
     }
-
-    makeKnob (sldSeqLen, 64, 1024, (double) proc.seqLen, 64);
-    sldSeqLen.onValueChange = [this] { proc.seqLen = (int) sldSeqLen.getValue(); };
-    makeLabel (lblSeqLen, "Seq Len");
 
     btnRunProcess.onClick = [this] {
         if (proc.audioFolder.isEmpty()) { browseFolder (true); return; }
@@ -476,9 +843,6 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     cmbSubdivision.addItem ("1/32",  3);
     cmbSubdivision.setSelectedId (proc.gridSubdivision, juce::dontSendNotification);
     cmbSubdivision.onChange = [this] { proc.gridSubdivision = cmbSubdivision.getSelectedId(); };
-    cmbSubdivision.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff313244));
-    cmbSubdivision.setColour (juce::ComboBox::textColourId, kFg);
-    cmbSubdivision.setColour (juce::ComboBox::arrowColourId, kAcc);
     addAndMakeVisible (cmbSubdivision);
     makeLabel (lblSubdivision, "Subdiv");
     lblSubdivision.setFont (juce::Font (11.5f));
@@ -488,6 +852,19 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     btnTriplets.setLookAndFeel (smallToggleLAF.get());
     btnTriplets.onStateChange = [this] { proc.allowTriplets = btnTriplets.getToggleState(); };
     addAndMakeVisible (btnTriplets);
+
+    btnQuantize.setToggleState (proc.quantize, juce::dontSendNotification);
+    btnQuantize.setColour (juce::ToggleButton::textColourId, kFg);
+    btnQuantize.setLookAndFeel (smallToggleLAF.get());
+    btnQuantize.onStateChange = [this] {
+        proc.quantize = btnQuantize.getToggleState();
+        bool q = proc.quantize;
+        cmbSubdivision.setEnabled (q);
+        btnTriplets   .setEnabled (q);
+    };
+    cmbSubdivision.setEnabled (proc.quantize);
+    btnTriplets   .setEnabled (proc.quantize);
+    addAndMakeVisible (btnQuantize);
 
     btnSeedFromData.setToggleState (proc.seedFromData, juce::dontSendNotification);
     btnSeedFromData.setColour (juce::ToggleButton::textColourId, kFg);
@@ -518,9 +895,16 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     };
     addAndMakeVisible (btnGenerate);
 
+    // ── Preset bar ────────────────────────────────────────────────────────────
+    btnSavePreset.onClick = [this] { savePreset(); };
+    btnLoadPreset.onClick = [this] { loadPreset(); };
+    addAndMakeVisible (btnSavePreset);
+    addAndMakeVisible (btnLoadPreset);
+
+    proc.onStateLoaded = [this] { refreshFromProcessor(); };
+
     // ── Shared ────────────────────────────────────────────────────────────────
     btnCancel.onClick = [this] { localErrorMessage.clear(); proc.cancelJob(); };
-    btnCancel.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff313244));
     addAndMakeVisible (btnCancel);
 
     lblStatus.setColour (juce::Label::textColourId, kFg);
@@ -551,7 +935,12 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
 AIMusicEditor::~AIMusicEditor()
 {
     stopTimer();
+    proc.onStateLoaded = nullptr;
+    setLookAndFeel (nullptr);    // must clear before LAF is destroyed
+    for (auto* s : { &sldTemperature, &sldTopP, &sldMaxTokens, &sldTempo })
+        s->setLookAndFeel (nullptr);
     btnTriplets    .setLookAndFeel (nullptr);
+    btnQuantize    .setLookAndFeel (nullptr);
     btnSeedFromData.setLookAndFeel (nullptr);
     btnSyncTempo   .setLookAndFeel (nullptr);
     for (auto* chk : { &chkLeadVox, &chkHarmVox, &chkGuitar, &chkBass, &chkDrums, &chkOther })
@@ -564,19 +953,56 @@ void AIMusicEditor::makeKnob (juce::Slider& s, double mn, double mx, double def,
     s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 60, 16);
     s.setRange (mn, mx, step);
     s.setValue (def, juce::dontSendNotification);
-    s.setColour (juce::Slider::rotarySliderFillColourId,    kAcc);
-    s.setColour (juce::Slider::rotarySliderOutlineColourId, kFg.withAlpha (0.3f));
-    s.setColour (juce::Slider::textBoxTextColourId,         kFg);
-    s.setColour (juce::Slider::textBoxOutlineColourId,      juce::Colours::transparentBlack);
+    s.setColour (juce::Slider::textBoxTextColourId,          kFg);
+    s.setColour (juce::Slider::textBoxOutlineColourId,       juce::Colours::transparentBlack);
+    s.setColour (juce::Slider::textBoxBackgroundColourId,    kBg);
+    s.setColour (juce::Slider::textBoxHighlightColourId,     kAcc.withAlpha (0.3f));
+    s.setLookAndFeel (mirrorKnobLAF.get());
     addAndMakeVisible (s);
 }
 
 void AIMusicEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (kBg);
+    // Pull phase first — drives both the background pulse and everything else
+    float tPhase = static_cast<MirrorMirror*> (mirrorAnim.get())->phase;
+
+    // ── Slowly pulsing diagonal background gradient ───────────────────────────
+    {
+        float pulse  = 0.5f + 0.5f * std::sin (tPhase * 0.13f);   // ~48-s cycle
+        float pulse2 = 0.5f + 0.5f * std::sin (tPhase * 0.09f + 1.1f);
+        float w = (float) getWidth(), h = (float) getHeight();
+
+        // Primary diagonal: top-left (soft blue-indigo) → bottom-right (mid indigo)
+        auto topLeft = juce::Colour (0xff2e2e48).interpolatedWith (
+                           juce::Colour (0xff2a2844), pulse);
+        juce::ColourGradient bg (
+            topLeft,                   0.f, 0.f,
+            juce::Colour (0xff191926), w,   h,   false);
+        bg.addColour (0.45, juce::Colour (0xff222236));
+        g.setGradientFill (bg);
+        g.fillRect (getLocalBounds());
+
+        // Cross-diagonal overlay: bottom-left (muted indigo tint) → top-right (transparent)
+        auto botLeft = juce::Colour (0xff1e1832).withAlpha (0.45f + 0.12f * pulse2);
+        juce::ColourGradient bg2 (
+            botLeft,                          0.f, h,
+            juce::Colours::transparentBlack,  w,   0.f, false);
+        g.setGradientFill (bg2);
+        g.fillRect (getLocalBounds());
+
+        // Slow drifting radial bloom — very faint so it reads as atmosphere not colour
+        float rx = w * (0.25f + 0.35f * (0.5f + 0.5f * std::sin (tPhase * 0.07f)));
+        float ry = h * 0.65f;
+        juce::ColourGradient radial (
+            juce::Colour (0xff6644cc).withAlpha (0.05f + 0.03f * pulse),
+            rx, ry,
+            juce::Colours::transparentBlack,
+            rx + w * 0.5f, ry, true);
+        g.setGradientFill (radial);
+        g.fillRect (getLocalBounds());
+    }
 
     // ── Orbiting sparkles around title (phase driven by MirrorMirror's 24fps timer) ──
-    float tPhase = static_cast<MirrorMirror*> (mirrorAnim.get())->phase;
     float titleCx = getWidth() * 0.5f;
     float titleCy = 18.f;
     for (int i = 0; i < 9; ++i)
@@ -608,11 +1034,41 @@ void AIMusicEditor::paint (juce::Graphics& g)
     tabLine.removeFromTop (36 + 28);
     g.setColour (kAcc.withAlpha (0.3f));
     g.drawHorizontalLine (tabLine.getY(), (float) tabLine.getX(), (float) tabLine.getRight());
+
+    // ── Pulsing halos for action buttons (drawn behind children) ──────────────
+    float ph = static_cast<MirrorMirror*> (mirrorAnim.get())->phase;
+
+    auto drawPulse = [&] (juce::Component& btn, juce::Colour glowCol, juce::Colour ringCol)
+    {
+        if (! btn.isVisible()) return;
+        float pulse = 0.5f + 0.5f * std::sin (ph * 2.8f);
+        auto outer = btn.getBounds().toFloat().expanded (4.f + pulse * 4.f);
+        auto ring  = btn.getBounds().toFloat().expanded (1.5f + pulse * 1.5f);
+        g.setColour (glowCol.withAlpha (pulse * 0.26f));
+        g.fillRoundedRectangle (outer, 7.f);
+        g.setColour (ringCol.withAlpha (0.35f + pulse * 0.45f));
+        g.drawRoundedRectangle (ring, 6.f, 1.5f);
+    };
+
+    // "Clear" — gold pulse (error context, tap to dismiss)
+    if (btnCancel.getButtonText() == "Clear")
+        drawPulse (btnCancel,  juce::Colour (0xffFFD700), juce::Colour (0xffFFBB44));
+
+    // "Show MIDI" — blue pulse (success, tap to reveal)
+    drawPulse (btnShowMidi, juce::Colour (0xff89b4fa), juce::Colour (0xffaaddff));
 }
 
 void AIMusicEditor::resized()
 {
     auto area = getLocalBounds().reduced (12);
+
+    // Preset Save/Load — top-right corner of the title strip
+    {
+        auto titleStrip = getLocalBounds().removeFromTop (36).reduced (8, 7);
+        btnLoadPreset.setBounds (titleStrip.removeFromRight (42));
+        titleStrip.removeFromRight (4);
+        btnSavePreset.setBounds (titleStrip.removeFromRight (42));
+    }
 
     // Mirror + its two action buttons stacked just above it
     constexpr int kMirrorW = 120, kMirrorH = 100;
@@ -656,13 +1112,6 @@ void AIMusicEditor::resized()
         }
         area.removeFromTop (10);
 
-        auto seqArea = area.removeFromTop (80);
-        int seqW = seqArea.getWidth() / 5; // same column width as generate tab knobs
-        auto seqCol = seqArea.removeFromLeft (seqW);
-        lblSeqLen.setBounds (seqCol.removeFromBottom (18));
-        sldSeqLen.setBounds (seqCol);
-        area.removeFromTop (10);
-
         auto btnRow = area.removeFromTop (34);
         btnRunProcess.setBounds (btnRow.removeFromLeft (140));
         btnRow.removeFromLeft (6);
@@ -695,6 +1144,7 @@ void AIMusicEditor::resized()
             auto col = knobArea;
             lblSubdivision.setBounds (col.removeFromBottom (18));
             btnTriplets   .setBounds (col.removeFromBottom (22));
+            btnQuantize   .setBounds (col.removeFromBottom (22));
             cmbSubdivision.setBounds (col.reduced (2, 6));
         }
 
@@ -737,14 +1187,14 @@ void AIMusicEditor::updateTabVisibility()
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &lblFolder, &btnBrowseFolder, &lblInstruments,
              &chkLeadVox, &chkHarmVox, &chkGuitar, &chkBass, &chkDrums, &chkOther,
-             &sldSeqLen, &lblSeqLen, &btnRunProcess, &btnTrain })
+             &btnRunProcess, &btnTrain })
         c->setVisible (onProcess);
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &lblCkpt, &btnBrowseCkpt,
              &sldTemperature, &sldTopP, &sldMaxTokens, &sldTempo,
              &lblTemperature, &lblTopP, &lblMaxTokens, &lblTempo,
-             &btnSyncTempo, &cmbSubdivision, &btnTriplets, &lblSubdivision,
+             &btnSyncTempo, &cmbSubdivision, &btnTriplets, &btnQuantize, &lblSubdivision,
              &btnSeedFromData, &btnGenerate })
         c->setVisible (!onProcess);
 
@@ -774,7 +1224,12 @@ void AIMusicEditor::timerCallback()
     auto& mm       = *static_cast<MirrorMirror*> (mirrorAnim.get());
     auto  curStage = proc.lastStatus.stage;
 
-    mm.isError = (curStage == "error") || localErrorMessage.isNotEmpty();
+    bool curIsError = (curStage == "error") || localErrorMessage.isNotEmpty();
+    mm.isError = curIsError;
+
+    // Shake "no" on fresh error
+    if (curIsError && ! prevIsError)
+        mm.triggerShake();
 
     // Nod when a new job starts (transition into a running state)
     const juce::StringArray kRunning { "processing", "training", "generating" };
@@ -785,7 +1240,8 @@ void AIMusicEditor::timerCallback()
     if (curStage == "done" && kRunning.contains (prevStage))
         mm.triggerCelebration();
 
-    prevStage = curStage;
+    prevIsError = curIsError;
+    prevStage   = curStage;
 }
 
 void AIMusicEditor::updateStatusLabel()
@@ -922,4 +1378,115 @@ void AIMusicEditor::browseCheckpoint()
                 updateTokenWarning();
             }
         });
+}
+
+void AIMusicEditor::savePreset()
+{
+    auto startDir = proc.getPref ("lastPresetDir");
+    auto dir = startDir.isNotEmpty() ? juce::File (startDir)
+                                     : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    auto chooser = std::make_shared<juce::FileChooser> ("Save Mirror Mirror Preset", dir, "*.mmpreset");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode |
+                          juce::FileBrowserComponent::canSelectFiles,
+        [this, chooser] (const juce::FileChooser& fc)
+        {
+            auto f = fc.getResult().withFileExtension (".mmpreset");
+            if (f.getFullPathName().isEmpty()) return;
+
+            juce::XmlElement xml ("MirrorMirrorPreset");
+            xml.setAttribute ("version",        1);
+            xml.setAttribute ("temperature",    proc.temperature);
+            xml.setAttribute ("topP",           proc.topP);
+            xml.setAttribute ("tempoBpm",       proc.tempoBpm);
+            xml.setAttribute ("gridSubdivision", proc.gridSubdivision);
+            xml.setAttribute ("allowTriplets",  proc.allowTriplets ? 1 : 0);
+            xml.setAttribute ("maxTokens",      proc.maxTokens);
+            xml.setAttribute ("syncTempo",      proc.syncTempo    ? 1 : 0);
+            xml.setAttribute ("seedFromData",   proc.seedFromData ? 1 : 0);
+            xml.setAttribute ("quantize",       proc.quantize     ? 1 : 0);
+            xml.setAttribute ("ckptPath",       proc.ckptPath);
+            xml.setAttribute ("audioFolder",    proc.audioFolder);
+            xml.setAttribute ("selectedTracks", proc.selectedTracks);
+            xml.writeTo (f);
+
+            proc.setPref ("lastPresetDir", f.getParentDirectory().getFullPathName());
+        });
+}
+
+void AIMusicEditor::loadPreset()
+{
+    auto startDir = proc.getPref ("lastPresetDir");
+    auto dir = startDir.isNotEmpty() ? juce::File (startDir)
+                                     : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    auto chooser = std::make_shared<juce::FileChooser> ("Load Mirror Mirror Preset", dir, "*.mmpreset");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode |
+                          juce::FileBrowserComponent::canSelectFiles,
+        [this, chooser] (const juce::FileChooser& fc)
+        {
+            auto f = fc.getResult();
+            if (! f.existsAsFile()) return;
+
+            auto xml = juce::XmlDocument::parse (f);
+            if (xml == nullptr || xml->getTagName() != "MirrorMirrorPreset") return;
+
+            proc.temperature     = (float) xml->getDoubleAttribute ("temperature",    proc.temperature);
+            proc.topP            = (float) xml->getDoubleAttribute ("topP",           proc.topP);
+            proc.tempoBpm        = (float) xml->getDoubleAttribute ("tempoBpm",       proc.tempoBpm);
+            proc.gridSubdivision =         xml->getIntAttribute    ("gridSubdivision", proc.gridSubdivision);
+            proc.allowTriplets   =         xml->getIntAttribute    ("allowTriplets",  proc.allowTriplets ? 1 : 0) != 0;
+            proc.maxTokens       =         xml->getIntAttribute    ("maxTokens",      proc.maxTokens);
+            proc.syncTempo       =         xml->getIntAttribute    ("syncTempo",      proc.syncTempo    ? 1 : 0) != 0;
+            proc.seedFromData    =         xml->getIntAttribute    ("seedFromData",   proc.seedFromData ? 1 : 0) != 0;
+            proc.quantize        =         xml->getIntAttribute    ("quantize",       proc.quantize     ? 1 : 0) != 0;
+            proc.ckptPath        =         xml->getStringAttribute ("ckptPath",       proc.ckptPath);
+            proc.audioFolder     =         xml->getStringAttribute ("audioFolder",    proc.audioFolder);
+            proc.selectedTracks  =         xml->getStringAttribute ("selectedTracks", proc.selectedTracks);
+
+            proc.setPref ("lastPresetDir", f.getParentDirectory().getFullPathName());
+            refreshFromProcessor();
+        });
+}
+
+void AIMusicEditor::refreshFromProcessor()
+{
+    sldTemperature.setValue (proc.temperature,    juce::dontSendNotification);
+    sldTopP       .setValue (proc.topP,           juce::dontSendNotification);
+    sldMaxTokens  .setValue (proc.maxTokens,      juce::dontSendNotification);
+    sldTempo      .setValue (proc.tempoBpm,       juce::dontSendNotification);
+
+    btnSyncTempo   .setToggleState (proc.syncTempo,     juce::dontSendNotification);
+    btnSeedFromData.setToggleState (proc.seedFromData,  juce::dontSendNotification);
+    btnQuantize    .setToggleState (proc.quantize,      juce::dontSendNotification);
+    btnTriplets    .setToggleState (proc.allowTriplets, juce::dontSendNotification);
+
+    cmbSubdivision.setSelectedId (proc.gridSubdivision, juce::dontSendNotification);
+
+    sldTempo      .setEnabled (! proc.syncTempo);
+    cmbSubdivision.setEnabled (proc.quantize);
+    btnTriplets   .setEnabled (proc.quantize);
+
+    lblCkpt  .setText (proc.ckptPath.isNotEmpty()    ? proc.ckptPath    : "No checkpoint selected",
+                       juce::dontSendNotification);
+    lblFolder.setText (proc.audioFolder.isNotEmpty() ? proc.audioFolder : "No folder selected",
+                       juce::dontSendNotification);
+
+    if (proc.selectedTracks.isEmpty())
+    {
+        for (auto* chk : { &chkLeadVox, &chkHarmVox, &chkGuitar, &chkBass, &chkDrums, &chkOther })
+            chk->setToggleState (true, juce::dontSendNotification);
+    }
+    else
+    {
+        auto tracks = juce::StringArray::fromTokens (proc.selectedTracks, ",", "");
+        chkLeadVox.setToggleState (tracks.contains ("voxlead"), juce::dontSendNotification);
+        chkHarmVox.setToggleState (tracks.contains ("voxharm"), juce::dontSendNotification);
+        chkGuitar .setToggleState (tracks.contains ("guitar"),  juce::dontSendNotification);
+        chkBass   .setToggleState (tracks.contains ("bass"),    juce::dontSendNotification);
+        chkDrums  .setToggleState (tracks.contains ("drums"),   juce::dontSendNotification);
+        chkOther  .setToggleState (tracks.contains ("other"),   juce::dontSendNotification);
+    }
+
+    updateTokenWarning();
 }

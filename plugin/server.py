@@ -203,18 +203,38 @@ def process(req: ProcessRequest):
             pipe_dir = ROOT / "vendor" / "all-in-one-ai-midi-pipeline"
 
             # Step 1: audio → MIDI via vendor pipeline
-            pipe_args = ["python", "pipeline.py", "run-batch",
-                         f"{audio_folder}/*.wav"]
-            if req.tracks:
-                pipe_args += ["--tracks", req.tracks]
-            if req.normalize_key:
-                pipe_args += ["--normalize-key"]
+            # Search recursively for every supported format; run the pipeline
+            # once per format that has at least one match in the folder.
+            audio_formats = ["*.wav", "*.mp3", "*.flac", "*.aiff", "*.aif", "*.m4a", "*.ogg"]
+            audio_folder_path = Path(audio_folder)
+            formats_found = [
+                fmt for fmt in audio_formats
+                if any(audio_folder_path.rglob(fmt))
+            ]
 
-            rc, tail = _run_streaming(pipe_args, cwd=pipe_dir)
-            if rc != 0:
-                if not _cancelled.is_set():
-                    _set_status(stage="error", error="vendor pipeline failed: " + " | ".join(tail[-3:]))
+            if not formats_found:
+                _set_status(stage="error",
+                            error=f"no audio files found in {audio_folder} "
+                                  "(looked for wav, mp3, flac, aiff, m4a, ogg)")
                 return
+
+            extra = []
+            if req.tracks:
+                extra += ["--tracks", req.tracks]
+            if req.normalize_key:
+                extra += ["--normalize-key"]
+
+            for fmt in formats_found:
+                pattern = str(audio_folder_path / "**" / fmt)
+                rc, tail = _run_streaming(
+                    ["python", "pipeline.py", "run-batch", pattern] + extra,
+                    cwd=pipe_dir,
+                )
+                if rc != 0:
+                    if not _cancelled.is_set():
+                        _set_status(stage="error",
+                                    error=f"vendor pipeline failed ({fmt}): " + " | ".join(tail[-3:]))
+                    return
 
             # Step 2: export MIDI
             rc, tail = _run_streaming(

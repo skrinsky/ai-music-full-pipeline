@@ -31,8 +31,6 @@ private:
     juce::ToggleButton chkBass    { "Bass" };
     juce::ToggleButton chkDrums   { "Drums" };
     juce::ToggleButton chkOther   { "Other" };
-    juce::Slider       sldSeqLen;
-    juce::Label        lblSeqLen;
     juce::TextButton   btnRunProcess { "Process Audio" };
     juce::TextButton   btnTrain      { "Train" };
 
@@ -44,9 +42,14 @@ private:
     juce::ToggleButton btnSyncTempo   { "Sync" };
     juce::ComboBox     cmbSubdivision;
     juce::ToggleButton btnTriplets    { "Include Triplets" };
+    juce::ToggleButton btnQuantize    { "Quantize" };
     juce::Label        lblSubdivision;
     juce::ToggleButton btnSeedFromData { "Seed from training data" };
     juce::TextButton   btnGenerate    { "Generate" };
+
+    // ── Preset bar ────────────────────────────────────────────────────────────
+    juce::TextButton btnSavePreset { "Save" };
+    juce::TextButton btnLoadPreset { "Load" };
 
     // ── Shared ────────────────────────────────────────────────────────────────
     juce::TextButton btnCancel { "Cancel" };
@@ -57,8 +60,11 @@ private:
     juce::String     lastMidiPath;
 
     std::unique_ptr<juce::Component> mirrorAnim;
+    std::unique_ptr<juce::LookAndFeel> mirrorUILAF;
     std::unique_ptr<juce::LookAndFeel> smallToggleLAF;
+    std::unique_ptr<juce::LookAndFeel> mirrorKnobLAF;
     juce::String prevStage;
+    bool         prevIsError { false };
     juce::String localErrorMessage;  // client-side errors that survive the server status poll
 
     void timerCallback() override;
@@ -70,6 +76,9 @@ private:
     void browseFolder (bool startAfterSelect = false);
     void browseCheckpoint();
     void makeKnob (juce::Slider&, double min, double max, double def, double step = 0.0);
+    void savePreset();
+    void loadPreset();
+    void refreshFromProcessor();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AIMusicEditor)
 };

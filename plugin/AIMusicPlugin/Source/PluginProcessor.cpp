@@ -162,16 +162,17 @@ void AIMusicProcessor::startTrain()
     auto eventsDir  = repoRoot2.exists()
                           ? repoRoot2.getChildFile ("runs/events").getFullPathName()
                           : juce::String ("runs/events");
-    client.postTrain (eventsDir, ckptPath, "auto", 200, seqLen);
+    client.postTrain (eventsDir, ckptPath, "auto", 200, 512);
 }
 
 void AIMusicProcessor::startGenerate()
 {
-    float bpm = syncTempo ? (float) getHostBpm() : tempoBpm;
-    int tripletStep = allowTriplets ? (gridSubdivision * 2 / 3) : 0;
+    float bpm          = syncTempo ? (float) getHostBpm() : tempoBpm;
+    int straightStep   = quantize ? gridSubdivision : 0;
+    int tripletStep    = (quantize && allowTriplets) ? (gridSubdivision * 2 / 3) : 0;
     pendingJobId = client.postGenerate (ckptPath, {}, {},
                                         temperature, topP, bpm,
-                                        gridSubdivision, tripletStep, maxTokens,
+                                        straightStep, tripletStep, maxTokens,
                                         seedFromData);
 }
 
@@ -188,12 +189,11 @@ void AIMusicProcessor::setPref (const juce::String& key, const juce::String& val
 
 bool AIMusicProcessor::isTrainingDataReady()
 {
-    // Only use paths explicitly set this session — no pref fallback here.
-    // audioFolder is restored from prefs on startup so returning users still work.
-    juce::File startDir;
-    if      (audioFolder.isNotEmpty()) startDir = juce::File (audioFolder);
-    else if (ckptPath.isNotEmpty())    startDir = juce::File (ckptPath).getParentDirectory();
-    else return false;
+    // audioFolder is the only valid anchor — restored from prefs on startup so
+    // returning users still work. ckptPath is intentionally NOT used here: a
+    // loaded model does not mean preprocessing has been run.
+    if (audioFolder.isEmpty()) return false;
+    juce::File startDir = juce::File (audioFolder);
 
     auto repoRoot = findRepoRoot (startDir);
     if (! repoRoot.exists()) return false;
@@ -267,6 +267,47 @@ void AIMusicProcessor::pollForMidi()
 
     juce::ScopedLock sl (midiLock);
     pendingMidi.swapWith (buf);
+}
+
+// ── preset / session state ────────────────────────────────────────────────────
+
+void AIMusicProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    juce::XmlElement xml ("MirrorMirrorPreset");
+    xml.setAttribute ("version",        1);
+    xml.setAttribute ("temperature",    temperature);
+    xml.setAttribute ("topP",           topP);
+    xml.setAttribute ("tempoBpm",       tempoBpm);
+    xml.setAttribute ("gridSubdivision", gridSubdivision);
+    xml.setAttribute ("allowTriplets",  allowTriplets ? 1 : 0);
+    xml.setAttribute ("maxTokens",      maxTokens);
+    xml.setAttribute ("syncTempo",      syncTempo     ? 1 : 0);
+    xml.setAttribute ("seedFromData",   seedFromData  ? 1 : 0);
+    xml.setAttribute ("quantize",       quantize      ? 1 : 0);
+    xml.setAttribute ("ckptPath",       ckptPath);
+    xml.setAttribute ("audioFolder",    audioFolder);
+    xml.setAttribute ("selectedTracks", selectedTracks);
+    copyXmlToBinary (xml, destData);
+}
+
+void AIMusicProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml == nullptr || xml->getTagName() != "MirrorMirrorPreset") return;
+    temperature     = (float) xml->getDoubleAttribute ("temperature",    temperature);
+    topP            = (float) xml->getDoubleAttribute ("topP",           topP);
+    tempoBpm        = (float) xml->getDoubleAttribute ("tempoBpm",       tempoBpm);
+    gridSubdivision =         xml->getIntAttribute    ("gridSubdivision", gridSubdivision);
+    allowTriplets   =         xml->getIntAttribute    ("allowTriplets",  allowTriplets ? 1 : 0) != 0;
+    maxTokens       =         xml->getIntAttribute    ("maxTokens",      maxTokens);
+    syncTempo       =         xml->getIntAttribute    ("syncTempo",      syncTempo    ? 1 : 0) != 0;
+    seedFromData    =         xml->getIntAttribute    ("seedFromData",   seedFromData ? 1 : 0) != 0;
+    quantize        =         xml->getIntAttribute    ("quantize",       quantize     ? 1 : 0) != 0;
+    ckptPath        =         xml->getStringAttribute ("ckptPath",       ckptPath);
+    audioFolder     =         xml->getStringAttribute ("audioFolder",    audioFolder);
+    selectedTracks  =         xml->getStringAttribute ("selectedTracks", selectedTracks);
+    if (onStateLoaded)
+        juce::MessageManager::callAsync (onStateLoaded);
 }
 
 // required by JUCE plugin factory

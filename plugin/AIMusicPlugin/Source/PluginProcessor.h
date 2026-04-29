@@ -15,7 +15,7 @@ public:
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
-    const juce::String getName() const override { return "AI Music"; }
+    const juce::String getName() const override { return "Mirror Mirror"; }
     bool acceptsMidi() const override  { return false; }
     bool producesMidi() const override { return true; }
     bool isMidiEffect() const override { return false; }
@@ -25,8 +25,8 @@ public:
     void setCurrentProgram (int) override {}
     const juce::String getProgramName (int) override { return {}; }
     void changeProgramName (int, const juce::String&) override {}
-    void getStateInformation (juce::MemoryBlock&) override {}
-    void setStateInformation (const void*, int) override {}
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported (const BusesLayout&) const override { return true; }
 
     // Pipeline control — called from editor
@@ -41,7 +41,6 @@ public:
     juce::String   ckptPath;
     juce::String   audioFolder;
     juce::String   selectedTracks;  // comma-separated demucs stems, empty = all
-    int            seqLen { 512 };
 
     // Generation parameters (owned by editor, read by processor on Generate)
     float  temperature    { 0.75f };
@@ -52,6 +51,7 @@ public:
     int    maxTokens      { 512 };
     bool   syncTempo      { true };
     bool   seedFromData   { true };
+    bool   quantize       { true };
 
     double getHostBpm() const { return cachedBpm.load(); }
     int    loadCheckpointInfo();
@@ -67,6 +67,7 @@ public:
     int trainingCtxLen { 0 };
 
     std::function<void()> onStatusChanged;
+    std::function<void()> onStateLoaded;   // editor refreshes UI after DAW session restore
 
 private:
     PipelineClient client;
