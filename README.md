@@ -8,6 +8,8 @@ The audio→MIDI stage is a git submodule at `vendor/all-in-one-ai-midi-pipeline
 
 For the full map of pipelines, entry points, and architecture, see **[CLAUDE.md](CLAUDE.md)**.
 
+Looking for the DAW plugin? → **[plugin/README.md](plugin/README.md)**
+
 ## Clone (with submodule)
 
 ```bash
