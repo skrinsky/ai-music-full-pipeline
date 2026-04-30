@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg noto-convert noto-train noto-generate ng
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg noto-convert noto-train noto-generate ng plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate pd pr pb pcfg prb pc pu pv
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -362,3 +362,55 @@ $(NOTO_DATA)/meta.json:
 	$(PYTHON) finetune/notochord_convert.py \
 	  --midi_dir $(FT_MIDI_DIR) \
 	  --out_dir  $(NOTO_DATA)
+
+# ---------------------------------------------------------------------------
+# AIMusicPlugin (JUCE AU + VST3)
+# Built via CMake; AU is patched + signed + installed to ~/Library by
+# the plugin's own POST_BUILD step.
+# ---------------------------------------------------------------------------
+
+PLUGIN_DIR        := plugin/AIMusicPlugin
+PLUGIN_BUILD_DIR  := $(PLUGIN_DIR)/build
+PLUGIN_JOBS       ?= 8
+# Read PRODUCT_NAME from CMakeLists.txt so uninstall tracks renames.
+PLUGIN_PRODUCT_NAME := $(shell sed -n 's/.*PRODUCT_NAME[[:space:]]*"\([^"]*\)".*/\1/p' $(PLUGIN_DIR)/CMakeLists.txt)
+# Past PRODUCT_NAMEs — `pu` also removes these so renames don't leave orphans.
+PLUGIN_LEGACY_NAMES := AI\ Music
+
+plugin-debug pd: ## Build AIMusicPlugin (Debug, AU + VST3, installs to ~/Library)
+	@$(MAKE) plugin-build PLUGIN_CONFIG=Debug
+
+plugin-release pr: ## Build AIMusicPlugin (Release, AU + VST3, installs to ~/Library)
+	@$(MAKE) plugin-build PLUGIN_CONFIG=Release
+
+plugin-build pb: ## Configure (if needed) + build (set PLUGIN_CONFIG=Debug|Release, default Debug)
+	@PLUGIN_CONFIG=$${PLUGIN_CONFIG:-Debug}; \
+	if [ ! -f $(PLUGIN_BUILD_DIR)/CMakeCache.txt ]; then \
+	  echo ">>> Configuring $(PLUGIN_DIR) ($$PLUGIN_CONFIG)"; \
+	  cmake -S $(PLUGIN_DIR) -B $(PLUGIN_BUILD_DIR) -DCMAKE_BUILD_TYPE=$$PLUGIN_CONFIG; \
+	fi; \
+	echo ">>> Building $(PLUGIN_DIR) ($$PLUGIN_CONFIG, j=$(PLUGIN_JOBS))"; \
+	cmake --build $(PLUGIN_BUILD_DIR) --config $$PLUGIN_CONFIG -j $(PLUGIN_JOBS)
+
+plugin-reconfigure pcfg: ## Force re-run cmake configure for the plugin
+	rm -f $(PLUGIN_BUILD_DIR)/CMakeCache.txt
+	cmake -S $(PLUGIN_DIR) -B $(PLUGIN_BUILD_DIR) -DCMAKE_BUILD_TYPE=$${PLUGIN_CONFIG:-Debug}
+
+plugin-rebuild prb: plugin-clean plugin-debug ## Clean + rebuild (Debug)
+
+plugin-clean pc: ## Remove plugin build directory
+	rm -rf $(PLUGIN_BUILD_DIR)
+
+plugin-uninstall pu: ## Remove installed AU + VST3 from ~/Library/Audio/Plug-Ins (current + legacy names)
+	@test -n "$(PLUGIN_PRODUCT_NAME)" || { echo "ERROR: could not parse PRODUCT_NAME from $(PLUGIN_DIR)/CMakeLists.txt"; exit 1; }
+	@for name in "$(PLUGIN_PRODUCT_NAME)" $(PLUGIN_LEGACY_NAMES); do \
+	  comp="$(HOME)/Library/Audio/Plug-Ins/Components/$$name.component"; \
+	  vst3="$(HOME)/Library/Audio/Plug-Ins/VST3/$$name.vst3"; \
+	  if [ -e "$$comp" ] || [ -e "$$vst3" ]; then \
+	    echo "Removing $$name.component and $$name.vst3"; \
+	    rm -rf "$$comp" "$$vst3"; \
+	  fi; \
+	done
+
+plugin-validate pv: ## Validate the installed AU with auval (slow, ~30s)
+	auval -v aumu Aimp Smkr
