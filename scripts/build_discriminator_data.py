@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build HDF5 training data for the note discriminator.
 
-Pipeline: blues MIDIs → per-stem MIDI → FluidSynth render → augmentation
+Pipeline: Slakh2100 per-stem FLAC → simulated bleed mix → augmentation
 → basic-pitch detection → GT alignment → feature extraction → HDF5.
 """
 
@@ -9,9 +9,6 @@ import argparse
 import multiprocessing
 import os
 import random
-import shutil
-import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -20,14 +17,10 @@ import numpy as np
 import pretty_midi
 import scipy.io.wavfile
 import scipy.signal
+import soundfile as sf
+import yaml
 
-# --------------- stem program maps ---------------
-STEM_PROGRAMS = {
-    "guitar": [24, 25, 26, 27, 28, 29, 30, 31],
-    "bass":   [32, 33, 34, 35, 36, 37, 38, 39],
-    "other":  [80, 81, 82, 83, 88, 89, 90, 91],
-}
-STEM_TO_SLOT = {"guitar": 2, "bass": 4, "other": 3}
+# --------------- stem local IDs ---------------
 STEM_LOCAL_ID = {"guitar": 0, "bass": 1, "other": 2}
 
 FEATURE_NAMES = [
@@ -46,17 +39,21 @@ FEATURE_NAMES = [
 ]
 N_FEATURES = len(FEATURE_NAMES)
 
-# --------------- GM program → stem (inline replicate of _slot_from_gm_program logic) ---------------
-def _prog_to_stem(prog: int):
-    """Return stem name or None."""
+
+# --------------- stem program map ---------------
+def _prog_to_stem(prog: int, is_drum: bool):
+    if is_drum:
+        return None
+    if 0 <= prog <= 7:
+        return "other"    # piano
+    if 16 <= prog <= 23:
+        return "other"    # organ
     if 24 <= prog <= 31:
         return "guitar"
     if 32 <= prog <= 39:
         return "bass"
-    if 16 <= prog <= 23:   # organ family → other
-        return "other"
-    if 80 <= prog <= 103:  # synth leads + pads + effects → other
-        return "other"
+    if 80 <= prog <= 103:
+        return "other"    # synth leads / pads
     return None
 
 
@@ -114,72 +111,74 @@ def apply_aug(audio: np.ndarray, sr: int, aug_name: str) -> np.ndarray:
     return a
 
 
-# --------------- SF2 / FluidSynth ---------------
-def _find_sf2() -> str:
-    candidates = [
-        Path.home() / "Library/Audio/Sounds/Banks/FluidR3_GM.sf2",
-        Path("/usr/share/sounds/sf2/FluidR3_GM.sf2"),
-        Path("/usr/share/soundfonts/default.sf2"),
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
-    return ""
+# --------------- Slakh helpers ---------------
+def load_slakh_track(track_dir: Path) -> dict:
+    """Return {stem_id: {flac_path, midi_path, stem_category, program_num}}."""
+    meta_path = track_dir / "metadata.yaml"
+    if not meta_path.exists():
+        return {}
+    with meta_path.open() as fh:
+        meta = yaml.safe_load(fh)
+
+    stems_meta = meta.get("stems", {})
+    result = {}
+    for stem_id, info in stems_meta.items():
+        if not info.get("audio_rendered", False):
+            continue
+        is_drum = info.get("is_drum", False)
+        prog = info.get("program_num", -1)
+        category = _prog_to_stem(prog, is_drum)
+        if category is None:
+            continue
+        flac_path = track_dir / "stems" / f"{stem_id}.flac"
+        midi_path = track_dir / "MIDI" / f"{stem_id}.mid"
+        if not flac_path.exists() or not midi_path.exists():
+            continue
+        result[stem_id] = {
+            "flac_path": flac_path,
+            "midi_path": midi_path,
+            "stem_category": category,
+            "program_num": prog,
+        }
+    return result
 
 
-def _check_fluidsynth():
-    if shutil.which("fluidsynth") is None:
-        print(
-            "ERROR: fluidsynth not found on PATH.\n"
-            "Install with: brew install fluidsynth   (macOS)\n"
-            "              apt-get install fluidsynth (Ubuntu)\n"
-        )
-        sys.exit(1)
+def get_gt_notes(midi_path: Path) -> list:
+    """Load pretty_midi, return sorted list of Note objects."""
+    pm = pretty_midi.PrettyMIDI(str(midi_path))
+    notes = []
+    for inst in pm.instruments:
+        notes.extend(inst.notes)
+    notes.sort(key=lambda n: n.start)
+    return notes
 
 
-def render_midi_to_wav(midi_path: str, wav_path: str, sf2: str, sr: int = 44100):
-    """Render MIDI to WAV via FluidSynth CLI."""
-    cmd = ["fluidsynth", "-ni", "-F", wav_path, "-r", str(sr), sf2, midi_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"FluidSynth failed: {result.stderr[:200]}")
-    if not Path(wav_path).exists():
-        raise RuntimeError(f"FluidSynth produced no output file: {wav_path}")
+def _load_flac_mono(flac_path: Path, sr_target: int = 44100) -> np.ndarray:
+    """Load FLAC, mix to mono float32 in [-1, 1]."""
+    data, sr = sf.read(str(flac_path), dtype="float32", always_2d=True)
+    audio = data.mean(axis=1)
+    if sr != sr_target:
+        # simple linear resample via scipy
+        n_out = int(len(audio) * sr_target / sr)
+        audio = scipy.signal.resample(audio, n_out).astype(np.float32)
+    return audio
 
 
-def load_wav_mono(wav_path: str):
-    """Load WAV, mix to mono float32 in [-1, 1]."""
-    sr, data = scipy.io.wavfile.read(wav_path)
-    data = data.astype(np.float32)
-    if data.ndim == 2:
-        data = data.mean(axis=1)
-    peak = np.max(np.abs(data))
+def mix_with_bleed(primary_audio: np.ndarray, bleed_audios: list, bleed_db: float = -20.0) -> np.ndarray:
+    """Mix primary + bleed stems at bleed_db; normalize to [-1, 1]."""
+    if not bleed_audios:
+        mixed = primary_audio.copy()
+    else:
+        bleed_gain = 10 ** (bleed_db / 20.0)
+        mixed = primary_audio.copy()
+        for b in bleed_audios:
+            # match lengths
+            n = min(len(mixed), len(b))
+            mixed[:n] += b[:n] * bleed_gain
+    peak = np.max(np.abs(mixed))
     if peak > 0:
-        data /= peak
-    return data, sr
-
-
-# --------------- per-stem MIDI ---------------
-def build_stem_midi(source_pm: pretty_midi.PrettyMIDI, stem: str, render_program: int) -> pretty_midi.PrettyMIDI:
-    """Return a PrettyMIDI with only instruments matching stem, re-programmed."""
-    out = pretty_midi.PrettyMIDI(initial_tempo=120.0)
-    # copy tempo changes
-    tc = source_pm.get_tempo_changes()
-    if tc[1].size > 0:
-        out = pretty_midi.PrettyMIDI(initial_tempo=float(tc[1][0]))
-
-    for inst in source_pm.instruments:
-        if inst.is_drum:
-            continue
-        if _prog_to_stem(inst.program) != stem:
-            continue
-        new_inst = pretty_midi.Instrument(program=render_program, is_drum=False, name=stem)
-        new_inst.notes = [pretty_midi.Note(
-            velocity=n.velocity, pitch=n.pitch, start=n.start, end=n.end
-        ) for n in inst.notes]
-        if new_inst.notes:
-            out.instruments.append(new_inst)
-    return out
+        mixed /= peak
+    return mixed
 
 
 # --------------- GT alignment ---------------
@@ -280,55 +279,95 @@ def run_basic_pitch(wav_path: str):
     return note_events
 
 
-# --------------- worker ---------------
-def process_task(task):
-    """Worker: (midi_path, stem, program, aug_name, sf2) → (features, labels, stem_ids, midi_name)."""
-    midi_path, stem, program, aug_name, sf2 = task
-    midi_name = Path(midi_path).name
-    print(f"  [{midi_name}] stem={stem} prog={program} aug={aug_name}", flush=True)
+# --------------- per-stem processor ---------------
+def process_stem(stem_info: dict, all_stem_infos: dict, track_dir: Path, aug_name: str, sr: int = 44100):
+    """Load primary stem + cross-stem bleed, augment, run basic-pitch, align GT.
+
+    Returns (features_array, labels_array) or None.
+    """
+    primary_audio = _load_flac_mono(stem_info["flac_path"], sr)
+    if primary_audio is None or len(primary_audio) == 0:
+        return None
+
+    # Bleed: all OTHER stems except drums (is_drum filtered out by _prog_to_stem already)
+    bleed_audios = []
+    primary_id = stem_info.get("_stem_id")
+    for sid, sinfo in all_stem_infos.items():
+        if sid == primary_id:
+            continue
+        try:
+            b = _load_flac_mono(sinfo["flac_path"], sr)
+            bleed_audios.append(b)
+        except Exception:
+            pass
+
+    mixed = mix_with_bleed(primary_audio, bleed_audios)
+    augmented = apply_aug(mixed, sr, aug_name)
+
+    gt_notes = get_gt_notes(stem_info["midi_path"])
+    if not gt_notes:
+        return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav_path = os.path.join(tmpdir, "stem_aug.wav")
+        out_int = (augmented * 32767).clip(-32768, 32767).astype(np.int16)
+        scipy.io.wavfile.write(wav_path, sr, out_int)
+        note_events = run_basic_pitch(wav_path)
+
+    if not note_events:
+        return None
+
+    labels = align_notes(note_events, gt_notes)
+    stem_local = STEM_LOCAL_ID[stem_info["stem_category"]]
+    feats = extract_features(note_events, stem_local)
+    labels_arr = np.array(labels, dtype=np.int8)
+    return feats, labels_arr
+
+
+# --------------- track worker ---------------
+def process_track(task):
+    """Worker: (track_dir_str, aug_name) → list of (feats, labels, stem_local_id, track_name)."""
+    track_dir_str, aug_name = task
+    track_dir = Path(track_dir_str)
+    track_name = track_dir.name
 
     try:
-        source_pm = pretty_midi.PrettyMIDI(midi_path)
-        stem_pm = build_stem_midi(source_pm, stem, program)
-        if not stem_pm.instruments:
-            return None
+        stem_infos = load_slakh_track(track_dir)
+        if not stem_infos:
+            return []
 
-        gt_notes = []
-        for inst in stem_pm.instruments:
-            gt_notes.extend(inst.notes)
-        if not gt_notes:
-            return None
+        # Annotate each stem_info with its own stem_id for bleed exclusion.
+        for sid, sinfo in stem_infos.items():
+            sinfo["_stem_id"] = sid
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            stem_midi_path = os.path.join(tmpdir, "stem.mid")
-            stem_pm.write(stem_midi_path)
-
-            raw_wav = os.path.join(tmpdir, "raw.wav")
-            render_midi_to_wav(stem_midi_path, raw_wav, sf2)
-
-            audio, sr = load_wav_mono(raw_wav)
-            audio = apply_aug(audio, sr, aug_name)
-
-            aug_wav = os.path.join(tmpdir, "aug.wav")
-            out_int = (audio * 32767).clip(-32768, 32767).astype(np.int16)
-            scipy.io.wavfile.write(aug_wav, sr, out_int)
-
-            note_events = run_basic_pitch(aug_wav)
-
-        if not note_events:
-            return None
-
-        labels = align_notes(note_events, gt_notes)
-        stem_local = STEM_LOCAL_ID[stem]
-        feats = extract_features(note_events, stem_local)
-        labels_arr = np.array(labels, dtype=np.int8)
-        stem_ids = np.full(len(note_events), stem_local, dtype=np.int8)
-        names = [midi_name] * len(note_events)
-        return feats, labels_arr, stem_ids, names
+        results = []
+        for stem_id, sinfo in stem_infos.items():
+            try:
+                ret = process_stem(sinfo, stem_infos, track_dir, aug_name)
+                if ret is None:
+                    continue
+                feats, labels_arr = ret
+                stem_local = STEM_LOCAL_ID[sinfo["stem_category"]]
+                n_det = len(labels_arr)
+                n_tp = int(labels_arr.sum())
+                print(
+                    f"{track_name} | {sinfo['stem_category']} ({stem_id}) | {aug_name} | "
+                    f"{n_det} notes detected, {n_tp} TP",
+                    flush=True,
+                )
+                stem_ids = np.full(n_det, stem_local, dtype=np.int8)
+                names = [f"{track_name}/{stem_id}"] * n_det
+                results.append((feats, labels_arr, stem_ids, names))
+            except Exception as exc:
+                print(
+                    f"  SKIP {track_name}/{stem_id} aug={aug_name}: {exc}",
+                    flush=True,
+                )
+        return results
 
     except Exception as exc:
-        print(f"  SKIP [{midi_name}] stem={stem} prog={program} aug={aug_name}: {exc}", flush=True)
-        return None
+        print(f"  SKIP {track_name} aug={aug_name}: {exc}", flush=True)
+        return []
 
 
 # --------------- HDF5 helpers ---------------
@@ -336,10 +375,10 @@ def _init_h5(path: Path, n_features: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as f:
         dt = h5py.special_dtype(vlen=str)
-        f.create_dataset("features",   shape=(0, n_features), maxshape=(None, n_features), dtype="float32", chunks=(4096, n_features))
-        f.create_dataset("labels",     shape=(0,),            maxshape=(None,),            dtype="int8",    chunks=(4096,))
-        f.create_dataset("stem_ids",   shape=(0,),            maxshape=(None,),            dtype="int8",    chunks=(4096,))
-        f.create_dataset("source_midi",shape=(0,),            maxshape=(None,),            dtype=dt,        chunks=(4096,))
+        f.create_dataset("features",    shape=(0, n_features), maxshape=(None, n_features), dtype="float32", chunks=(4096, n_features))
+        f.create_dataset("labels",      shape=(0,),            maxshape=(None,),            dtype="int8",    chunks=(4096,))
+        f.create_dataset("stem_ids",    shape=(0,),            maxshape=(None,),            dtype="int8",    chunks=(4096,))
+        f.create_dataset("source_midi", shape=(0,),            maxshape=(None,),            dtype=dt,        chunks=(4096,))
 
 
 def _append_h5(path: Path, feats, labels, stem_ids, names):
@@ -360,59 +399,44 @@ def _append_h5(path: Path, feats, labels, stem_ids, names):
 # --------------- main ---------------
 def main():
     ap = argparse.ArgumentParser("build_discriminator_data: build HDF5 note discriminator training set.")
-    ap.add_argument("--midi_dir", default="data/blues_midi", help="Source MIDI directory.")
-    ap.add_argument("--out",      default="runs/discriminator_data/notes.h5", help="Output HDF5 path.")
-    ap.add_argument("--n_midis",  type=int, default=50,   help="Number of MIDIs to sample.")
-    ap.add_argument("--workers",  type=int, default=4,    help="Multiprocessing pool size.")
-    ap.add_argument("--sf2",      default="",             help="Override SF2 path (auto-detect if empty).")
-    ap.add_argument("--seed",     type=int, default=42)
+    ap.add_argument("--slakh_dir", default="data/slakh/train", help="Slakh2100 train split directory.")
+    ap.add_argument("--out",       default="runs/discriminator_data/notes.h5", help="Output HDF5 path.")
+    ap.add_argument("--n_tracks",  type=int, default=100,  help="Number of tracks to sample.")
+    ap.add_argument("--workers",   type=int, default=1,    help="Multiprocessing pool size.")
+    ap.add_argument("--seed",      type=int, default=42)
     args = ap.parse_args()
 
-    _check_fluidsynth()
-
-    sf2 = args.sf2 if args.sf2 else _find_sf2()
-    if not sf2:
-        print(
-            "ERROR: no SF2 soundfont found. Download FluidR3_GM.sf2 and pass --sf2 <path>."
-        )
-        sys.exit(1)
-    print(f"Using SF2: {sf2}")
-
-    midi_dir = Path(args.midi_dir)
-    midi_files = sorted(midi_dir.glob("*.mid")) + sorted(midi_dir.glob("*.midi"))
-    if not midi_files:
-        print(f"ERROR: no MIDI files found in {midi_dir}")
-        sys.exit(1)
+    slakh_dir = Path(args.slakh_dir)
+    track_dirs = sorted(slakh_dir.glob("Track*"))
+    if not track_dirs:
+        print(f"ERROR: no Track* directories found in {slakh_dir}")
+        raise SystemExit(1)
 
     random.seed(args.seed)
-    sample = random.sample(midi_files, min(args.n_midis, len(midi_files)))
-    print(f"Processing {len(sample)} MIDIs from {midi_dir}")
+    sample = random.sample(track_dirs, min(args.n_tracks, len(track_dirs)))
+    print(f"Processing {len(sample)} tracks from {slakh_dir}")
 
-    # Build task list: (midi_path, stem, program, aug, sf2)
+    # Build task list: (track_dir_str, aug_name)
     tasks = []
-    for midi_path in sample:
-        for stem, programs in STEM_PROGRAMS.items():
-            for program in programs:
-                for aug in AUGMENTATIONS:
-                    tasks.append((str(midi_path), stem, program, aug, sf2))
+    for track_dir in sample:
+        for aug in AUGMENTATIONS:
+            tasks.append((str(track_dir), aug))
 
-    print(f"Total tasks: {len(tasks)}")
+    print(f"Total tasks: {len(tasks)} ({len(sample)} tracks × {len(AUGMENTATIONS)} augmentations)")
 
     out_path = Path(args.out)
     _init_h5(out_path, N_FEATURES)
 
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(processes=args.workers) as pool:
-        for result in pool.imap_unordered(process_task, tasks, chunksize=1):
-            if result is None:
-                continue
-            feats, labels, stem_ids, names = result
-            _append_h5(out_path, feats, labels, stem_ids, names)
+        for results in pool.imap_unordered(process_track, tasks, chunksize=1):
+            for feats, labels, stem_ids, names in results:
+                _append_h5(out_path, feats, labels, stem_ids, names)
 
     with h5py.File(out_path, "r") as f:
         n_total = f["labels"].shape[0]
         n_tp = int(np.sum(f["labels"][:]))
-    print(f"\nDone. {n_total} notes written to {out_path}  (TP={n_tp}, FP={n_total-n_tp})")
+    print(f"\nDone. {n_total} notes written to {out_path}  (TP={n_tp}, FP={n_total - n_tp})")
 
 
 if __name__ == "__main__":
