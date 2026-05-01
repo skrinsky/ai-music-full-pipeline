@@ -380,7 +380,7 @@ def main():
     out_path = Path(args.out)
     _init_h5(out_path, N_FEATURES)
 
-    ctx = multiprocessing.get_context("spawn")
+    ctx = multiprocessing.get_context("fork")
     with ctx.Pool(processes=args.workers) as pool:
         for results in pool.imap_unordered(process_track, tasks, chunksize=1):
             for feats, labels, stem_ids, names in results:
