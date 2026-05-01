@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg noto-convert noto-train noto-generate ng plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate pd pr pb pcfg prb pc pu pv disc-data disc-train slakh-fetch
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg noto-convert noto-train noto-generate ng plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate pd pr pb pcfg prb pc pu pv disc-data disc-train disc-train-combined slakh-fetch slakh-stems
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -78,22 +78,31 @@ blues-resume: $(BLUES_CKPT) ## Resume blues training from latest checkpoint
 blues-retrain: ## make blues-preprocess && make blues-train
 	make blues-preprocess && make blues-train
 
-slakh-fetch: ## Download Slakh2100 from Zenodo (~5 GB for first 100 tracks)
+slakh-fetch: ## Download Slakh2100 MIDI stems from Zenodo (first N tracks; default N=100)
 	$(PYTHON) scripts/fetch_slakh.py --out_dir data/slakh --n_tracks 100 $(ARGS)
+
+slakh-stems: ## Fetch stems/ FLACs for already-downloaded Slakh tracks (streams full archive)
+	$(PYTHON) scripts/fetch_slakh.py --out_dir data/slakh --continue_stems $(ARGS)
 
 data/slakh/.fetched:
 	$(PYTHON) scripts/fetch_slakh.py --out_dir data/slakh --n_tracks 100 $(ARGS)
 
-disc-data: data/slakh/.fetched ## Build note discriminator training data (Slakh2100 pre-rendered stems)
+disc-data: data/slakh/.fetched ## Build note discriminator HDF5 (scalars + mel patches)
 	$(PYTHON) scripts/build_discriminator_data.py \
 	  --slakh_dir data/slakh/train \
 	  --out runs/discriminator_data/notes.h5 $(ARGS)
 
-disc-train: runs/discriminator_data/notes.h5 ## Train the note discriminator MLP
+disc-train: runs/discriminator_data/notes.h5 ## Train scalar MLP discriminator
 	$(PYTHON) -m training.train_discriminator \
 	  --data runs/discriminator_data/notes.h5 \
 	  --out  runs/discriminator/model.pt \
 	  --epochs 60 $(ARGS)
+
+disc-train-combined: runs/discriminator_data/notes.h5 ## Train combined CNN+MLP discriminator (needs spec_patches)
+	$(PYTHON) -m training.train_discriminator \
+	  --data runs/discriminator_data/notes.h5 \
+	  --out  runs/discriminator/combined_model.pt \
+	  --combined --epochs 80 $(ARGS)
 
 $(BLUES_EVENTS)/events_train.pkl: data/blues_midi/.fetched
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS)

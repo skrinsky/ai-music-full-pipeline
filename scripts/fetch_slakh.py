@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Download Slakh2100 from Zenodo with streaming tar extraction.
 
-Stops after --n_tracks tracks without downloading the full 104 GB archive.
+Two modes:
+  Initial  (default): stream archive, extract first --n_tracks tracks (MIDI + stems + metadata).
+  Continue (--continue_stems): stream archive again, fetch stems/ for tracks already downloaded.
+                                Needed because the Zenodo tar lists per-track directories in
+                                alphabetical order by path component, so stems/ come after MIDI/
+                                in the archive and the initial extraction may miss them when
+                                stopping early by track count.
 """
 
 import argparse
@@ -14,92 +20,180 @@ import requests
 DEFAULT_URL = "https://zenodo.org/records/4599666/files/slakh2100_flac_redux.tar.gz"
 
 
-def main():
-    ap = argparse.ArgumentParser("fetch_slakh: stream-download Slakh2100 from Zenodo.")
-    ap.add_argument("--out_dir",  default="data/slakh",   help="Output directory.")
-    ap.add_argument("--n_tracks", type=int, default=100,  help="Tracks to extract (0 = all).")
-    ap.add_argument("--split",    default="train",        help="Which split folder to extract.")
-    ap.add_argument("--url",      default=DEFAULT_URL,    help="Zenodo download URL.")
-    args = ap.parse_args()
+# --------------- streaming helper ----------------------------------------
 
-    out_dir = Path(args.out_dir)
-    sentinel = out_dir / ".fetched"
+class _StreamingIO(io.RawIOBase):
+    """Wrap a requests iter_content stream as a file-like object for tarfile."""
 
-    if sentinel.exists():
-        print("Already downloaded — delete data/slakh/.fetched to re-fetch.")
-        return
+    def __init__(self, iter_content):
+        self._buf = b""
+        self._iter = iter_content
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    def readinto(self, b):
+        while not self._buf:
+            try:
+                self._buf = next(self._iter)
+            except StopIteration:
+                return 0
+        n = len(b)
+        out = self._buf[:n]
+        self._buf = self._buf[n:]
+        b[: len(out)] = out
+        return len(out)
 
-    prefix = f"slakh2100_flac_redux/{args.split}/Track"
+    def readable(self):
+        return True
 
-    print(f"Streaming {args.url}")
-    print(f"Extracting split={args.split}, n_tracks={args.n_tracks or 'all'} → {out_dir}")
 
-    response = requests.get(args.url, stream=True)
+def _open_archive(url: str):
+    response = requests.get(url, stream=True)
     response.raise_for_status()
+    return tarfile.open(
+        fileobj=io.BufferedReader(_StreamingIO(response.iter_content(chunk_size=1 << 20))),
+        mode="r|gz",
+    )
 
-    # Wrap the streaming response in a file-like object for tarfile.
-    class _StreamingIO(io.RawIOBase):
-        def __init__(self, iter_content):
-            self._buf = b""
-            self._iter = iter_content
 
-        def readinto(self, b):
-            while not self._buf:
-                try:
-                    self._buf = next(self._iter)
-                except StopIteration:
-                    return 0
-            n = len(b)
-            out = self._buf[:n]
-            self._buf = self._buf[n:]
-            b[:len(out)] = out
-            return len(out)
+def _extract_member(tar, member, dest: Path):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if member.isfile():
+        fobj = tar.extractfile(member)
+        if fobj is not None:
+            dest.write_bytes(fobj.read())
+    elif member.isdir():
+        dest.mkdir(parents=True, exist_ok=True)
 
-        def readable(self):
-            return True
 
-    stream_io = io.BufferedReader(_StreamingIO(response.iter_content(chunk_size=1 << 20)))
+# --------------- initial fetch -------------------------------------------
 
-    seen_tracks = set()
-    extracted = 0
+def fetch_initial(out_dir: Path, split: str, url: str, n_tracks: int):
+    """Stream archive and extract the first n_tracks tracks (all files per track)."""
+    prefix = f"slakh2100_flac_redux/{split}/Track"
+    seen: set = set()
 
-    with tarfile.open(fileobj=stream_io, mode="r|gz") as tar:
+    print(f"Streaming {url}")
+    print(f"Extracting first {n_tracks} tracks → {out_dir}/{split}/")
+
+    with _open_archive(url) as tar:
         for member in tar:
             if not member.name.startswith(prefix):
                 continue
-
-            # Identify the Track directory (e.g. "slakh2100_flac_redux/train/Track00001")
             parts = member.name.split("/")
-            # parts: ['slakh2100_flac_redux', 'train', 'Track00001', ...]
             if len(parts) < 3:
                 continue
             track_name = parts[2]
 
-            if args.n_tracks > 0 and track_name not in seen_tracks and len(seen_tracks) >= args.n_tracks:
-                # We've already hit the limit and this is a new track — stop.
+            if n_tracks > 0 and track_name not in seen and len(seen) >= n_tracks:
                 break
 
-            if track_name not in seen_tracks:
-                seen_tracks.add(track_name)
-                extracted += 1
-                print(f"  extracting {track_name} ({extracted}/{args.n_tracks or '?'})", flush=True)
+            if track_name not in seen:
+                seen.add(track_name)
+                print(f"  {track_name} ({len(seen)}/{n_tracks})", flush=True)
 
-            # Strip the "slakh2100_flac_redux/" prefix so files land under out_dir/split/Track*/
-            rel = "/".join(parts[1:])
+            rel  = "/".join(parts[1:])
             dest = out_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            _extract_member(tar, member, dest)
 
-            if member.isfile():
-                fobj = tar.extractfile(member)
-                if fobj is not None:
-                    dest.write_bytes(fobj.read())
-            elif member.isdir():
-                dest.mkdir(parents=True, exist_ok=True)
+    return seen
 
-    sentinel.write_text(f"extracted {len(seen_tracks)} tracks from {args.split}\n")
-    print(f"\nDone. {len(seen_tracks)} tracks → {out_dir}")
+
+# --------------- continue: fetch stems for existing tracks ---------------
+
+def fetch_stems(out_dir: Path, split: str, url: str):
+    """Stream archive and fetch stems/ + metadata.yaml for already-downloaded tracks."""
+    split_dir = out_dir / split
+    wanted    = {t.name for t in split_dir.glob("Track*") if (t / "MIDI").exists()}
+    has_stems = {
+        t.name
+        for t in split_dir.glob("Track*")
+        if (t / "stems").exists() and list((t / "stems").glob("*.flac"))
+    }
+    missing = wanted - has_stems
+
+    if not missing:
+        print(f"All {len(wanted)} tracks already have stems. Nothing to do.")
+        return has_stems
+
+    print(f"Need stems for {len(missing)}/{len(wanted)} tracks.")
+    print(f"Streaming {url} — this may require downloading most of the archive.")
+
+    prefix    = f"slakh2100_flac_redux/{split}/Track"
+    extracted: set = set()
+
+    with _open_archive(url) as tar:
+        for member in tar:
+            if not member.name.startswith(prefix):
+                continue
+            parts = member.name.split("/")
+            if len(parts) < 3:
+                continue
+            track_name = parts[2]
+
+            if track_name not in wanted:
+                continue  # not a track we care about
+
+            # Skip MIDI — already have it
+            inner = parts[3] if len(parts) > 3 else ""
+            if inner == "MIDI":
+                continue
+
+            rel  = "/".join(parts[1:])
+            dest = out_dir / rel
+            _extract_member(tar, member, dest)
+
+            # Track completion: at least one FLAC written for this track
+            if inner == "stems":
+                stems_dir = split_dir / track_name / "stems"
+                if stems_dir.exists() and list(stems_dir.glob("*.flac")):
+                    if track_name not in extracted:
+                        extracted.add(track_name)
+                        print(
+                            f"  stems done: {track_name} "
+                            f"({len(extracted)}/{len(missing)})",
+                            flush=True,
+                        )
+
+            if extracted >= missing:
+                print("All stems extracted — stopping early.")
+                break
+
+    return has_stems | extracted
+
+
+# --------------- main ----------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser("fetch_slakh: stream-download Slakh2100 from Zenodo.")
+    ap.add_argument("--out_dir",        default="data/slakh")
+    ap.add_argument("--n_tracks",       type=int, default=100,  help="Tracks for initial fetch.")
+    ap.add_argument("--split",          default="train")
+    ap.add_argument("--url",            default=DEFAULT_URL)
+    ap.add_argument("--continue_stems", action="store_true",
+                    help="Fetch stems/ for tracks already downloaded (MIDI present).")
+    ap.add_argument("--force",          action="store_true",
+                    help="Re-download even if sentinel exists.")
+    args = ap.parse_args()
+
+    out_dir  = Path(args.out_dir)
+    sentinel = out_dir / ".fetched"
+
+    if args.continue_stems:
+        result = fetch_stems(out_dir, args.split, args.url)
+        sentinel.write_text(f"fetched stems for {len(result)} tracks from {args.split}\n")
+        print(f"\nSentinel updated: {sentinel}")
+        return
+
+    if sentinel.exists() and not args.force:
+        print(
+            "Already downloaded — delete data/slakh/.fetched to re-fetch, "
+            "or use --continue_stems to add stems."
+        )
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    seen = fetch_initial(out_dir, args.split, args.url, args.n_tracks)
+    sentinel.write_text(f"extracted {len(seen)} tracks from {args.split}\n")
+    print(f"\nDone. {len(seen)} tracks → {out_dir}")
     print(f"Sentinel written: {sentinel}")
 
 
