@@ -442,6 +442,106 @@ def get_midi(job_id: str):
                         filename=path.name)
 
 
+@app.get("/preview/{job_id}")
+def get_preview(job_id: str, fs: int = 44100, bpm: float = 0.0):
+    """Return a WAV preview of the generated MIDI.
+
+    Uses FluidSynth + GM soundfont when available for proper instrument sounds;
+    falls back to pretty_midi's numpy synthesizer otherwise.
+    Pass bpm to render at the DAW session tempo instead of the MIDI's embedded tempo.
+    Results are cached so repeated requests with the same fs+bpm are instant.
+    """
+    midi_path = _midi_files.get(job_id)
+    if midi_path is None or not midi_path.exists():
+        raise HTTPException(404, "MIDI not found — job may still be running")
+
+    bpm_tag = f"_{int(round(bpm))}" if bpm > 0 else ""
+    wav_path = midi_path.parent / f"preview_{fs}{bpm_tag}.wav"
+    if not wav_path.exists():
+        _render_preview_wav(midi_path, wav_path, fs, bpm)
+
+    if not wav_path.exists():
+        raise HTTPException(500, "Preview render failed — check server logs")
+
+    return FileResponse(str(wav_path), media_type="audio/wav",
+                        filename="preview.wav")
+
+
+def _find_sf2() -> "str | None":
+    """Return path to a GM SoundFont, or None."""
+    candidates = [
+        os.path.expanduser("~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2"),
+        "/usr/share/sounds/sf2/FluidR3_GM.sf2",
+        "/usr/local/share/soundfonts/default.sf2",
+        "/usr/share/soundfonts/default.sf2",
+        "C:/soundfonts/default.sf2",
+        "C:/Program Files/Music/soundfonts/default.sf2",
+    ]
+    return next((p for p in candidates if os.path.isfile(p)), None)
+
+
+def _render_preview_wav(midi_path: "Path", wav_path: "Path", fs: int,
+                        target_bpm: float = 0.0) -> None:
+    import shutil as _sh, tempfile
+    import pretty_midi, numpy as np, scipy.io.wavfile
+
+    # Determine if we need to rescale from the MIDI's embedded tempo to target_bpm
+    need_rescale = False
+    scale = 1.0
+    if target_bpm > 0:
+        try:
+            _probe = pretty_midi.PrettyMIDI(str(midi_path))
+            _, tempos = _probe.get_tempo_changes()
+            embedded_bpm = float(tempos[0]) if len(tempos) > 0 else 120.0
+            if abs(embedded_bpm - target_bpm) > 0.5:
+                need_rescale = True
+                scale = embedded_bpm / target_bpm
+        except Exception:
+            pass
+
+    # 1. FluidSynth (best quality, proper GM sounds) — only when no BPM rescaling needed
+    #    because FluidSynth reads the raw MIDI file and would ignore our in-memory edits.
+    if not need_rescale:
+        sf2 = _find_sf2()
+        if sf2 and _sh.which("fluidsynth"):
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp_path = tmp.name
+                subprocess.run(
+                    ["fluidsynth", "-ni", "-F", tmp_path,
+                     "-r", str(fs), sf2, str(midi_path)],
+                    check=True, capture_output=True, timeout=120,
+                )
+                _sh.move(tmp_path, wav_path)
+                return
+            except Exception as exc:
+                print(f"[preview] FluidSynth failed: {exc}")
+
+    # 2. pretty_midi synthesis (with optional BPM rescale)
+    try:
+        pm = pretty_midi.PrettyMIDI(str(midi_path))
+        if need_rescale:
+            for inst in pm.instruments:
+                for note in inst.notes:
+                    note.start *= scale
+                    note.end   *= scale
+                for cc in inst.control_changes:
+                    cc.time *= scale
+                for pb in inst.pitch_bends:
+                    pb.time *= scale
+                for pc in inst.program_changes:
+                    pc.time *= scale
+        audio = pm.synthesize(fs=fs)
+        if len(audio) > 0:
+            peak = np.abs(audio).max()
+            if peak > 0:
+                audio = audio / peak * 0.8
+            scipy.io.wavfile.write(str(wav_path), fs,
+                                   (audio * 32767).astype(np.int16))
+    except Exception as exc:
+        print(f"[preview] pretty_midi synthesis failed: {exc}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

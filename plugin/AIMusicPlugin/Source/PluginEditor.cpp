@@ -447,7 +447,7 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
 {
     void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPos, float startAngle, float endAngle,
-                           juce::Slider&) override
+                           juce::Slider& slider) override
     {
         auto constexpr twoPi  = juce::MathConstants<float>::twoPi;
         auto constexpr halfPi = juce::MathConstants<float>::halfPi;
@@ -589,6 +589,17 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
                 float cr = sr * 0.028f;
                 g.fillEllipse (wx - cr, wy - cr, cr * 2.f, cr * 2.f);
             }
+        }
+
+        // Frozen-state overlay — rendered on top of the knob when disabled
+        if (! slider.isEnabled())
+        {
+            // Dim veil — bg colour at ~66% alpha kills the glow and colour
+            g.setColour (juce::Colour (0xa81e1e2e));
+            g.fillEllipse (cx - r - 4.f, cy - r - 4.f, (r + 4.f) * 2.f, (r + 4.f) * 2.f);
+            // Ice-blue rim signals "frozen", not just "turned off"
+            g.setColour (juce::Colour (0x5589b4fa));
+            g.drawEllipse (cx - r, cy - r, r * 2.f, r * 2.f, 1.5f);
         }
     }
 };
@@ -979,6 +990,20 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     btnShowMidi.addMouseListener (this, false);
     addAndMakeVisible (btnShowMidi);
 
+    btnPreview.setVisible (false);
+    btnPreview.onClick = [this] {
+        if (proc.isPreviewPlaying())
+            proc.stopPreview();
+        else if (lastMidiPath.isNotEmpty())
+            proc.startPreview (lastMidiPath);
+    };
+    addAndMakeVisible (btnPreview);
+
+    proc.onPreviewStateChanged = [this] (bool playing) {
+        btnPreview.setButtonText (playing ? "Stop" : "Preview");
+        repaint();
+    };
+
     updateTabVisibility();
     startTimer (1500);
 }
@@ -986,7 +1011,9 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
 AIMusicEditor::~AIMusicEditor()
 {
     stopTimer();
-    proc.onStateLoaded = nullptr;
+    proc.onStateLoaded          = nullptr;
+    proc.onPreviewStateChanged  = nullptr;
+    proc.stopPreview();
     setLookAndFeel (nullptr);    // must clear before LAF is destroyed
     for (auto* s : { &sldTemperature, &sldTopP, &sldMaxTokens, &sldTempo })
         s->setLookAndFeel (nullptr);
@@ -1107,6 +1134,10 @@ void AIMusicEditor::paint (juce::Graphics& g)
 
     // "Show MIDI" — blue pulse (success, tap to reveal)
     drawPulse (btnShowMidi, juce::Colour (0xff89b4fa), juce::Colour (0xffaaddff));
+
+    // "Preview" — green pulse while playing
+    if (proc.isPreviewPlaying())
+        drawPulse (btnPreview, juce::Colour (0xff50fa7b), juce::Colour (0xff88ffaa));
 }
 
 void AIMusicEditor::resized()
@@ -1125,9 +1156,10 @@ void AIMusicEditor::resized()
     constexpr int kMirrorW = 120, kMirrorH = 100;
     int mirrorX = getWidth() - kMirrorW - 4;
     int mirrorY = getHeight() - kMirrorH - 6;
-    mirrorAnim ->setBounds (mirrorX, mirrorY,           kMirrorW, kMirrorH);
-    btnCancel  .setBounds  (mirrorX, mirrorY - 26,      kMirrorW, 22);
-    btnShowMidi.setBounds  (mirrorX, mirrorY - 26 - 26, kMirrorW, 22);
+    mirrorAnim ->setBounds (mirrorX, mirrorY,                kMirrorW, kMirrorH);
+    btnCancel  .setBounds  (mirrorX, mirrorY - 26,          kMirrorW, 22);
+    btnShowMidi.setBounds  (mirrorX, mirrorY - 26 - 26,     kMirrorW, 22);
+    btnPreview .setBounds  (mirrorX, mirrorY - 26 - 26 - 26, kMirrorW, 22);
 
     area.removeFromTop (36); // title
 
@@ -1306,6 +1338,7 @@ void AIMusicEditor::updateStatusLabel()
         btnCancel .setVisible (true);
         btnCancel .setButtonText ("Clear");
         btnShowMidi.setVisible (false);
+        btnPreview  .setVisible (false);
         btnRunProcess.setEnabled (true);
         btnTrain     .setEnabled (true);
         btnGenerate  .setEnabled (true);
@@ -1344,23 +1377,40 @@ void AIMusicEditor::updateStatusLabel()
             if (repoRoot.isNotEmpty())
             {
                 lastMidiPath = repoRoot + "/runs/generated/plugin/" + jobId + "/generated.mid";
-                btnShowMidi.setVisible (juce::File (lastMidiPath).existsAsFile());
+                bool midiReady = juce::File (lastMidiPath).existsAsFile();
+                btnShowMidi.setVisible (midiReady);
+                btnPreview  .setVisible (midiReady);
             }
         }
     }
     else if (s.stage != "done")
     {
         btnShowMidi.setVisible (false);
+        btnPreview  .setVisible (false);
     }
 
     bool busy = (s.stage == "processing" || s.stage == "training" || s.stage == "generating");
     btnCancel.setVisible (busy || s.stage == "error");
     btnCancel.setButtonText (busy ? "Cancel" : "Clear");
 
-    bool serverReady = (s.stage == "idle" || s.stage == "done" || s.stage == "error");
+    bool serverReady  = (s.stage == "idle" || s.stage == "done" || s.stage == "error");
+    bool generating   = (s.stage == "generating");
+
     btnRunProcess.setEnabled (true);
     btnTrain     .setEnabled (serverReady);
     btnGenerate  .setEnabled (serverReady);
+
+    // Freeze all generation parameters while inference is running
+    btnBrowseCkpt  .setEnabled (! generating);
+    sldTemperature .setEnabled (! generating);
+    sldTopP        .setEnabled (! generating);
+    sldMaxTokens   .setEnabled (! generating);
+    sldTempo       .setEnabled (! generating && ! proc.syncTempo);
+    btnSyncTempo   .setEnabled (! generating);
+    btnSeedFromData.setEnabled (! generating);
+    btnQuantize    .setEnabled (! generating);
+    cmbSubdivision .setEnabled (! generating && proc.quantize);
+    btnTriplets    .setEnabled (! generating && proc.quantize);
 }
 
 void AIMusicEditor::updateTokenWarning()

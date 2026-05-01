@@ -141,6 +141,26 @@ int PipelineClient::fetchCheckpointInfo (const juce::String& ckptPath)
     return 0;
 }
 
+bool PipelineClient::fetchPreviewWav (const juce::String& jobId,
+                                       juce::MemoryBlock& wavData,
+                                       int sampleRate,
+                                       double bpm)
+{
+    juce::String path = "/preview/" + jobId + "?fs=" + juce::String (sampleRate);
+    if (bpm > 0.0)
+        path += "&bpm=" + juce::String (bpm, 2);
+    juce::URL url (baseUrl + path);
+    int statusCode = 0;
+    auto stream = url.createInputStream (
+        juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+            .withConnectionTimeoutMs (60000)   // server may need time to synthesise
+            .withStatusCode (&statusCode));
+    if (stream == nullptr || statusCode != 200) return false;
+    wavData.reset();
+    stream->readIntoMemoryBlock (wavData);
+    return wavData.getSize() > 0;
+}
+
 bool PipelineClient::fetchMidi (const juce::String& jobId, juce::MemoryBlock& midiData)
 {
     juce::URL url (baseUrl + "/midi/" + jobId);

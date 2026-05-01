@@ -57,6 +57,7 @@ private:
     juce::Label      lblMessage;
     juce::Label      lblTokenWarning;
     juce::TextButton btnShowMidi { "Show MIDI" };
+    juce::TextButton btnPreview  { "Preview" };
     juce::String     lastMidiPath;
 
     std::unique_ptr<juce::Component> mirrorAnim;

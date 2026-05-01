@@ -48,6 +48,10 @@ public:
     // Download MIDI for a completed job; returns true + fills midiData on success
     bool fetchMidi (const juce::String& jobId, juce::MemoryBlock& midiData);
 
+    // Download WAV preview (server synthesises on demand); sampleRate and bpm forwarded
+    bool fetchPreviewWav (const juce::String& jobId, juce::MemoryBlock& wavData,
+                          int sampleRate = 44100, double bpm = 0.0);
+
     // Returns the SEQ_LEN the checkpoint was trained with, or 0 on failure
     int fetchCheckpointInfo (const juce::String& ckptPath);
 
