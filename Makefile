@@ -87,8 +87,7 @@ data/slakh/.fetched:
 disc-data: data/slakh/.fetched ## Build note discriminator training data (Slakh2100 pre-rendered stems)
 	$(PYTHON) scripts/build_discriminator_data.py \
 	  --slakh_dir data/slakh/train \
-	  --out runs/discriminator_data/notes.h5 \
-	  --n_tracks 100 --workers 1 $(ARGS)
+	  --out runs/discriminator_data/notes.h5 $(ARGS)
 
 disc-train: runs/discriminator_data/notes.h5 ## Train the note discriminator MLP
 	$(PYTHON) -m training.train_discriminator \
