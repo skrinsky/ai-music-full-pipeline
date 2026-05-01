@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg noto-convert noto-train noto-generate ng plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate pd pr pb pcfg prb pc pu pv
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg noto-convert noto-train noto-generate ng plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate pd pr pb pcfg prb pc pu pv disc-data disc-train
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -77,6 +77,18 @@ blues-resume: $(BLUES_CKPT) ## Resume blues training from latest checkpoint
 
 blues-retrain: ## make blues-preprocess && make blues-train
 	make blues-preprocess && make blues-train
+
+disc-data: data/blues_midi/.fetched ## Build note discriminator training data (requires fluidsynth)
+	$(PYTHON) scripts/build_discriminator_data.py \
+	  --midi_dir data/blues_midi \
+	  --out runs/discriminator_data/notes.h5 \
+	  --n_midis 50 --workers 4 $(ARGS)
+
+disc-train: runs/discriminator_data/notes.h5 ## Train the note discriminator MLP
+	$(PYTHON) -m training.train_discriminator \
+	  --data runs/discriminator_data/notes.h5 \
+	  --out  runs/discriminator/model.pt \
+	  --epochs 60 $(ARGS)
 
 $(BLUES_EVENTS)/events_train.pkl: data/blues_midi/.fetched
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS)

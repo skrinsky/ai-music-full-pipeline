@@ -29,6 +29,7 @@ Aux_dim depends on instrument config (blues6=36, chorale4=24).
 """
 
 import os
+import sys
 import glob
 import json
 import random
@@ -1190,6 +1191,10 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="Overwrite existing event_vocab.json without prompting. "
                          "WARNING: this will break any checkpoint trained on the old vocab.")
+    ap.add_argument("--discriminator", default="",
+                    help="Path to note discriminator .pt checkpoint (empty = disabled).")
+    ap.add_argument("--disc_threshold", type=float, default=0.35,
+                    help="Keep notes with P(TP) >= this threshold (default 0.35).")
     args = ap.parse_args()
 
     if args.diagnose_drums:
@@ -1211,6 +1216,13 @@ def main():
     SEQ_LEN    = args.seq_len
     SEQ_STRIDE = args.seq_stride if args.seq_stride is not None else SEQ_LEN // 2
     print(f"Window: seq_len={SEQ_LEN}, stride={SEQ_STRIDE}")
+
+    # Load discriminator if requested
+    disc = None
+    if args.discriminator:
+        from training.note_discriminator import NoteDiscriminator
+        disc = NoteDiscriminator.load(args.discriminator, device="cpu")
+        print(f"Discriminator loaded: {args.discriminator}  threshold={args.disc_threshold}")
 
     os.makedirs(DATA_FOLDER, exist_ok=True)
 
@@ -1247,6 +1259,8 @@ def main():
     song_meta: Dict[str, Tuple[list, float, np.ndarray, list]] = {}
     all_bars_meta = []
     skipped_not_bluesy = 0
+    disc_notes_before = 0
+    disc_notes_after  = 0
     for p in paths:
         try:
             ev, tempo, bar_starts, bars_meta = extract_multitrack_events(p, config)
@@ -1254,6 +1268,15 @@ def main():
             ev = [e for e in ev if e[1] in allowed_inst_idx]
             if not ev:
                 raise RuntimeError('No events remain after track filtering.')
+
+            # Optional: discriminator filtering
+            if disc is not None:
+                from training.note_discriminator import score_events
+                disc_notes_before += len(ev)
+                ev = score_events(ev, disc, tempo, threshold=args.disc_threshold)
+                disc_notes_after += len(ev)
+                if not ev:
+                    raise RuntimeError('No events remain after discriminator filtering.')
 
             # Optional: Blues Filter
             if args.blues_only and not is_track_bluesy(ev, tempo, config=config):
@@ -1268,6 +1291,13 @@ def main():
 
     if skipped_not_bluesy > 0:
         print(f"Filtered out {skipped_not_bluesy} songs for not meeting blues criteria (--blues_only).")
+    if disc is not None:
+        disc_filtered = disc_notes_before - disc_notes_after
+        print(
+            f"Discriminator filtered {disc_filtered} / {disc_notes_before} notes "
+            f"({100.0 * disc_filtered / max(disc_notes_before, 1):.1f}% removed, "
+            f"threshold={args.disc_threshold})."
+        )
 
     if not any(song_meta[p][0] for p in song_meta):
         raise RuntimeError("No events extracted. Check your MIDI folder & mapping heuristics.")
