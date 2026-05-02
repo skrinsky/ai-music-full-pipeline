@@ -1135,9 +1135,9 @@ void AIMusicEditor::paint (juce::Graphics& g)
     // "Show MIDI" — blue pulse (success, tap to reveal)
     drawPulse (btnShowMidi, juce::Colour (0xff89b4fa), juce::Colour (0xffaaddff));
 
-    // "Preview" — green pulse while playing
+    // "Preview" — mauve pulse while playing (matches dark theme palette)
     if (proc.isPreviewPlaying())
-        drawPulse (btnPreview, juce::Colour (0xff50fa7b), juce::Colour (0xff88ffaa));
+        drawPulse (btnPreview, juce::Colour (0xffcba6f7), juce::Colour (0xffe0b8ff));
 }
 
 void AIMusicEditor::resized()
@@ -1159,7 +1159,7 @@ void AIMusicEditor::resized()
     mirrorAnim ->setBounds (mirrorX, mirrorY,                kMirrorW, kMirrorH);
     btnCancel  .setBounds  (mirrorX, mirrorY - 26,          kMirrorW, 22);
     btnShowMidi.setBounds  (mirrorX, mirrorY - 26 - 26,     kMirrorW, 22);
-    btnPreview .setBounds  (mirrorX, mirrorY - 26 - 26 - 26, kMirrorW, 22);
+    btnPreview .setBounds  (mirrorX, mirrorY - 26 - 26 - 26 - 6, kMirrorW, 22);
 
     area.removeFromTop (36); // title
 
