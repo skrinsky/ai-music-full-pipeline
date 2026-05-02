@@ -255,6 +255,14 @@ def process(req: ProcessRequest):
             if req.tracks:
                 pre_args += ["--tracks", req.tracks]
 
+            # Auto-use discriminator if checkpoint is present (combined model preferred)
+            for _disc_name in ("combined_model.pt", "model.pt"):
+                _disc_path = ROOT / "runs" / "discriminator" / _disc_name
+                if _disc_path.exists():
+                    pre_args += ["--discriminator", str(_disc_path)]
+                    print(f"[process] discriminator: {_disc_name}", flush=True)
+                    break
+
             rc, tail = _run_streaming(pre_args, cwd=ROOT)
             if rc != 0:
                 if not _cancelled.is_set():
