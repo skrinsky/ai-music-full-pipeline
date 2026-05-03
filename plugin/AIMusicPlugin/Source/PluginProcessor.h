@@ -33,7 +33,7 @@ public:
 
     // Pipeline control — called from editor
     void startProcess (const juce::String& audioFolder);
-    void startTrain();
+    void startTrain (const juce::String& eventsDir = {});
     void startGenerate();
     void cancelJob();
 
@@ -60,6 +60,7 @@ public:
     bool   isTrainingDataReady();
     juce::String getPref (const juce::String& key, const juce::String& fallback = {});
     void         setPref (const juce::String& key, const juce::String& value);
+    juce::String fetchLatestEvents() { return client.fetchLatestEvents(); }
 
     // MIDI to send out on next processBlock call (filled from background thread)
     juce::MidiBuffer pendingMidi;

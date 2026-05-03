@@ -358,14 +358,19 @@ void AIMusicProcessor::startProcess (const juce::String& folder)
     client.postProcess (folder, selectedTracks);
 }
 
-void AIMusicProcessor::startTrain()
+void AIMusicProcessor::startTrain (const juce::String& eventsDir)
 {
-    auto startDir2  = juce::File (ckptPath.isNotEmpty() ? ckptPath : audioFolder);
-    auto repoRoot2  = findRepoRoot (startDir2);
-    auto eventsDir  = repoRoot2.exists()
-                          ? repoRoot2.getChildFile ("runs/events").getFullPathName()
-                          : juce::String ("runs/events");
-    client.postTrain (eventsDir, ckptPath, "auto", 200, 512);
+    if (eventsDir.isNotEmpty())
+    {
+        client.postTrain (eventsDir, ckptPath, "auto", 200, 512);
+        return;
+    }
+    auto startDir2 = juce::File (ckptPath.isNotEmpty() ? ckptPath : audioFolder);
+    auto repoRoot2 = findRepoRoot (startDir2);
+    auto dir       = repoRoot2.exists()
+                         ? repoRoot2.getChildFile ("runs/events").getFullPathName()
+                         : juce::String ("runs/events");
+    client.postTrain (dir, ckptPath, "auto", 200, 512);
 }
 
 void AIMusicProcessor::startGenerate()

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Build HDF5 training data for the combined note discriminator.
 
-Pipeline: Slakh2100 per-stem audio (FLAC if available, FluidSynth otherwise)
-→ simulated bleed mix → augmentation → basic-pitch detection → GT alignment
-→ scalar feature extraction → mel spectrogram patch extraction → HDF5.
+Default pipeline (--use-demucs, recommended):
+  Slakh2100 per-stem audio → full mix → htdemucs_6s separation →
+  augmentation → basic-pitch → GT alignment → scalar features + mel patches → HDF5.
+
+Legacy pipeline (without --use-demucs):
+  Slakh2100 per-stem audio → simulated bleed mix → augmentation →
+  basic-pitch → GT alignment → scalar features + mel patches → HDF5.
 
 HDF5 datasets written per note:
   features    (N, 12)           float32  — timbre-invariant scalar features
@@ -97,6 +101,44 @@ def find_sf2() -> str:
     raise FileNotFoundError(
         "No SF2 soundfont found. Pass --sf2 explicitly. Searched: " + ", ".join(SF2_CANDIDATES)
     )
+
+
+# --------------- demucs separation ---------------------------------------
+
+# htdemucs_6s source order: drums, bass, other, vocals, guitar, piano
+_DEMUCS_SOURCES = ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano']
+_DEMUCS_TARGET_STEMS = {'guitar', 'bass', 'other'}  # stems we care about
+
+# Worker-local model (loaded once per process via initializer)
+_demucs_model = None
+
+
+def _init_worker(use_demucs: bool):
+    global _demucs_model
+    if use_demucs:
+        from demucs.pretrained import get_model
+        _demucs_model = get_model('htdemucs_6s')
+        _demucs_model.eval()
+
+
+def separate_with_demucs(mix_mono: np.ndarray, sr: int = 44100) -> dict:
+    """Run htdemucs_6s on a mono mix; return {stem_name: mono_float32 array}."""
+    import torch
+    model = _demucs_model
+    # demucs expects stereo (2, T) at model.samplerate
+    if sr != model.samplerate:
+        n_out = int(len(mix_mono) * model.samplerate / sr)
+        mix_mono = np.interp(
+            np.linspace(0, len(mix_mono) - 1, n_out),
+            np.arange(len(mix_mono)),
+            mix_mono,
+        ).astype(np.float32)
+    stereo = torch.tensor(np.stack([mix_mono, mix_mono])).unsqueeze(0)  # (1, 2, T)
+    with torch.no_grad():
+        from demucs.apply import apply_model
+        out = apply_model(model, stereo, progress=False)  # (1, sources, 2, T)
+    out_np = out.squeeze(0).mean(dim=1).cpu().numpy()     # (sources, T) mono
+    return {name: out_np[i] for i, name in enumerate(model.sources)}
 
 
 # --------------- stem program map ----------------------------------------
@@ -309,8 +351,43 @@ def run_basic_pitch(wav_path: str):
 
 # --------------- per-track worker ---------------------------------------
 
+def _process_stem_audio(stem_audio, category, midi_path, track_dir, sr,
+                         n_mels, n_frames, hop_length):
+    """Run augmentations → basic-pitch → align → extract features+patches for one stem."""
+    gt_notes   = get_gt_notes(midi_path)
+    if not gt_notes:
+        return []
+    stem_local = STEM_LOCAL_ID[category]
+    results    = []
+    for aug_name in AUGMENTATIONS:
+        augmented = apply_aug(stem_audio, sr, aug_name)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wav_path = os.path.join(tmpdir, "aug.wav")
+            scipy.io.wavfile.write(wav_path, sr,
+                                   (augmented * 32767).clip(-32768, 32767).astype(np.int16))
+            try:
+                note_events = run_basic_pitch(wav_path)
+            except Exception as exc:
+                print(f"  SKIP {track_dir.name} bp({aug_name}): {exc}", flush=True)
+                continue
+        if not note_events:
+            continue
+        labels     = align_notes(note_events, gt_notes)
+        feats      = extract_features(note_events, stem_local)
+        labels_arr = np.array(labels, dtype=np.int8)
+        log_mel    = compute_log_mel(augmented, sr, n_mels, hop_length)
+        patches    = extract_spec_patches(log_mel, note_events, sr, hop_length, n_mels, n_frames)
+        n_tp = int(labels_arr.sum())
+        print(f"{track_dir.name} | {category} | {aug_name} | {len(labels_arr)} notes, {n_tp} TP",
+              flush=True)
+        stem_ids_arr = np.full(len(labels_arr), stem_local, dtype=np.int8)
+        names        = [f"{track_dir.name}/{category}"] * len(labels_arr)
+        results.append((feats, labels_arr, stem_ids_arr, names, patches))
+    return results
+
+
 def process_track(task):
-    """Render / load all qualifying stems, run all augmentations.
+    """Process one Slakh track.  Uses demucs separation if _demucs_model is loaded.
 
     Returns list of (feats, labels, stem_ids, names, spec_patches).
     """
@@ -322,9 +399,9 @@ def process_track(task):
 
     sr = 44100
 
-    # Step 1: load/render every stem once.
-    primary_stems = {}   # stem_id → (audio, category, midi_path)
-    all_audio     = {}   # all stems including non-target (for bleed)
+    # Load/render every stem.
+    primary_stems = {}   # category → list of (audio, midi_path)
+    all_audio     = {}   # stem_id → audio (for building full mix)
 
     for midi_path in sorted(midi_dir.glob("*.mid")):
         stem_id = midi_path.stem
@@ -336,60 +413,63 @@ def process_track(task):
             all_audio[stem_id] = audio
             category = _prog_to_stem(prog, is_drum)
             if category is not None:
-                primary_stems[stem_id] = (audio, category, midi_path)
+                primary_stems.setdefault(category, []).append((audio, midi_path))
         except Exception as exc:
             print(f"  SKIP {track_dir.name}/{stem_id} render: {exc}", flush=True)
 
-    if not primary_stems:
+    if not primary_stems or not all_audio:
         return []
 
     results = []
-    for stem_id, (primary_audio, category, midi_path) in primary_stems.items():
+
+    if _demucs_model is not None:
+        # ── Demucs path ────────────────────────────────────────────────────
+        # Build full mix from all stems, run demucs once, use separated outputs.
         try:
-            gt_notes = get_gt_notes(midi_path)
-            if not gt_notes:
-                continue
+            lengths = [len(a) for a in all_audio.values()]
+            max_len = max(lengths)
+            mix = np.zeros(max_len, dtype=np.float32)
+            for a in all_audio.values():
+                mix[:len(a)] += a
+            peak = np.max(np.abs(mix))
+            if peak > 0:
+                mix /= peak
 
-            bleeds = [a for sid, a in all_audio.items() if sid != stem_id]
-            mixed  = mix_with_bleed(primary_audio, bleeds)
-            stem_local = STEM_LOCAL_ID[category]
-
-            for aug_name in AUGMENTATIONS:
-                augmented = apply_aug(mixed, sr, aug_name)
-
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    wav_path = os.path.join(tmpdir, "aug.wav")
-                    scipy.io.wavfile.write(wav_path, sr,
-                                          (augmented * 32767).clip(-32768, 32767).astype(np.int16))
-                    try:
-                        note_events = run_basic_pitch(wav_path)
-                    except Exception as exc:
-                        print(f"  SKIP {track_dir.name}/{stem_id} bp({aug_name}): {exc}", flush=True)
-                        continue
-
-                if not note_events:
-                    continue
-
-                labels     = align_notes(note_events, gt_notes)
-                feats      = extract_features(note_events, stem_local)
-                labels_arr = np.array(labels, dtype=np.int8)
-
-                # Mel spectrogram patches
-                log_mel = compute_log_mel(augmented, sr, n_mels, hop_length)
-                patches = extract_spec_patches(log_mel, note_events, sr, hop_length, n_mels, n_frames)
-
-                n_tp = int(labels_arr.sum())
-                print(
-                    f"{track_dir.name} | {category} ({stem_id}) | {aug_name} "
-                    f"| {len(labels_arr)} notes, {n_tp} TP",
-                    flush=True,
-                )
-                stem_ids_arr = np.full(len(labels_arr), stem_local, dtype=np.int8)
-                names        = [f"{track_dir.name}/{stem_id}"] * len(labels_arr)
-                results.append((feats, labels_arr, stem_ids_arr, names, patches))
-
+            separated = separate_with_demucs(mix, sr)
         except Exception as exc:
-            print(f"  SKIP {track_dir.name}/{stem_id}: {exc}", flush=True)
+            print(f"  SKIP {track_dir.name} demucs: {exc}", flush=True)
+            return []
+
+        # For each target category, use the demucs-separated stem audio.
+        # Merge all MIDI notes for that category into a single GT set.
+        for category in _DEMUCS_TARGET_STEMS:
+            if category not in separated:
+                continue
+            stem_audio = separated[category]
+            # Collect GT notes from all Slakh stems that map to this category
+            gt_midi_paths = [mp for (_, mp) in primary_stems.get(category, [])]
+            if not gt_midi_paths:
+                continue
+            # Write a merged GT by concatenating all MIDI notes across sub-stems
+            for midi_path in gt_midi_paths:
+                try:
+                    for r in _process_stem_audio(stem_audio, category, midi_path,
+                                                  track_dir, sr, n_mels, n_frames, hop_length):
+                        results.append(r)
+                except Exception as exc:
+                    print(f"  SKIP {track_dir.name}/{category}: {exc}", flush=True)
+    else:
+        # ── Legacy path (clean stem + simulated bleed) ─────────────────────
+        for stem_id_key, stems_list in primary_stems.items():
+            for primary_audio, midi_path in stems_list:
+                try:
+                    bleeds = [a for sid, a in all_audio.items()]
+                    mixed  = mix_with_bleed(primary_audio, bleeds)
+                    for r in _process_stem_audio(mixed, stem_id_key, midi_path,
+                                                  track_dir, sr, n_mels, n_frames, hop_length):
+                        results.append(r)
+                except Exception as exc:
+                    print(f"  SKIP {track_dir.name}/{stem_id_key}: {exc}", flush=True)
 
     return results
 
@@ -440,10 +520,17 @@ def main():
     ap.add_argument("--n_frames",    type=int, default=32)
     ap.add_argument("--hop_length",  type=int, default=512)
     ap.add_argument("--seed",        type=int, default=42)
+    ap.add_argument("--use-demucs",  action="store_true", default=True,
+                    help="Mix all stems → htdemucs_6s separation → use demucs output "
+                         "for both basic-pitch and mel patches (recommended). "
+                         "Pass --no-use-demucs to use the legacy clean-stem pipeline.")
+    ap.add_argument("--no-use-demucs", dest="use_demucs", action="store_false")
     args = ap.parse_args()
 
-    sf2 = args.sf2 or find_sf2()
-    print(f"Soundfont: {sf2}")
+    sf2 = args.sf2 or (find_sf2() if not args.use_demucs else "")
+    if not args.use_demucs:
+        print(f"Soundfont: {sf2}")
+    print(f"Pipeline: {'demucs (htdemucs_6s)' if args.use_demucs else 'legacy clean-stem+bleed'}")
     print(f"Mel patches: {args.n_mels} bands × {args.n_frames} frames (hop={args.hop_length})")
 
     slakh_dir  = Path(args.slakh_dir)
@@ -461,7 +548,9 @@ def main():
     _init_h5(out_path, N_FEATURES, args.n_mels, args.n_frames)
 
     ctx = multiprocessing.get_context("fork")
-    with ctx.Pool(processes=args.workers) as pool:
+    initargs = (args.use_demucs,)
+    with ctx.Pool(processes=args.workers,
+                  initializer=_init_worker, initargs=initargs) as pool:
         for results in pool.imap_unordered(process_track, tasks, chunksize=1):
             for feats, labels, stem_ids, names, patches in results:
                 _append_h5(out_path, feats, labels, stem_ids, names, patches)

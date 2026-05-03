@@ -1195,6 +1195,8 @@ def main():
                     help="Path to note discriminator .pt checkpoint (empty = disabled).")
     ap.add_argument("--disc_threshold", type=float, default=0.35,
                     help="Keep notes with P(TP) >= this threshold (default 0.35).")
+    ap.add_argument("--stems_dir", default="",
+                    help="Path to htdemucs_6s stems root (enables combined CNN+scalar discriminator).")
     args = ap.parse_args()
 
     if args.diagnose_drums:
@@ -1261,7 +1263,8 @@ def main():
     skipped_not_bluesy = 0
     disc_notes_before = 0
     disc_notes_after  = 0
-    for p in paths:
+    for _pi, p in enumerate(paths):
+        print(f"PREPROCESS {_pi + 1}/{len(paths)}", flush=True)
         try:
             ev, tempo, bar_starts, bars_meta = extract_multitrack_events(p, config)
             # Filter to selected tracks (keep canonical index space)
@@ -1271,9 +1274,19 @@ def main():
 
             # Optional: discriminator filtering
             if disc is not None:
-                from training.note_discriminator import score_events
                 disc_notes_before += len(ev)
-                ev = score_events(ev, disc, tempo, threshold=args.disc_threshold)
+                if args.stems_dir:
+                    from training.note_discriminator import score_events_with_audio
+                    track_name = Path(p).stem.split("__")[0]
+                    ev = score_events_with_audio(
+                        ev, disc, tempo,
+                        stems_dir=Path(args.stems_dir),
+                        track_name=track_name,
+                        threshold=args.disc_threshold,
+                    )
+                else:
+                    from training.note_discriminator import score_events
+                    ev = score_events(ev, disc, tempo, threshold=args.disc_threshold)
                 disc_notes_after += len(ev)
                 if not ev:
                     raise RuntimeError('No events remain after discriminator filtering.')

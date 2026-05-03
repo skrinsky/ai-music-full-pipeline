@@ -56,6 +56,8 @@ _status: dict = {
     "train_loss": None,
     "val_loss": None,
     "error": None,
+    "progress": None,      # 0.0–1.0 during preprocessing, None otherwise
+    "events_dir": None,    # path to preprocessed events folder after processing
     "daw_insert": None,    # 'reaper' | 'ableton' | '*_error' | 'unsupported' | None
 }
 
@@ -112,11 +114,21 @@ _EPOCH_RE = re.compile(
     r"Epoch\s+(\d+).*?val:\s+loss=([\d.]+)", re.IGNORECASE
 )
 
+_PREPROCESS_RE = re.compile(r"^PREPROCESS\s+(\d+)/(\d+)$")
+
 
 def _parse_train_line(line: str):
     m = _EPOCH_RE.search(line)
     if m:
         _set_status(epoch=int(m.group(1)), val_loss=float(m.group(2)))
+
+
+def _parse_preprocess_line(line: str):
+    m = _PREPROCESS_RE.match(line)
+    if m:
+        done, total = int(m.group(1)), int(m.group(2))
+        raw = done / total if total > 0 else 0.0
+        _set_status(progress=0.40 + 0.60 * raw)  # step 3 fills 0.40 → 1.0
 
 
 # ── request models ────────────────────────────────────────────────────────────
@@ -175,6 +187,20 @@ def status():
     return dict(_status)
 
 
+@app.get("/latest_events")
+def latest_events():
+    """Return the most recently modified events folder that contains events_train.pkl."""
+    events_root = ROOT / "runs" / "events"
+    best_path, best_mtime = None, 0.0
+    if events_root.exists():
+        for pkl in events_root.rglob("events_train.pkl"):
+            mtime = pkl.stat().st_mtime
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_path = str(pkl.parent)
+    return {"events_dir": best_path}
+
+
 @app.post("/cancel")
 def cancel():
     global _current_proc
@@ -193,18 +219,27 @@ def process(req: ProcessRequest):
 
     def run():
         try:
-            _set_status(stage="processing", message="audio → MIDI → preprocess",
-                        error=None, epoch=None, val_loss=None)
+            _set_status(stage="processing", message="starting…",
+                        error=None, epoch=None, val_loss=None, events_dir=None,
+                        progress=0.0)
 
             audio_folder = str(Path(req.audio_folder).resolve())
-            midi_dir     = str(ROOT / "out_midis")
-            events_dir   = str(ROOT / "runs" / "events")
+            slug         = re.sub(r"[^\w-]", "_", Path(audio_folder).name) or "default"
+            midi_dir     = str(ROOT / "out_midis" / slug)
+            events_dir   = str(ROOT / "runs" / "events" / slug)
 
-            pipe_dir = ROOT / "vendor" / "all-in-one-ai-midi-pipeline"
+            # Skip all processing if this folder was already preprocessed
+            events_pkl = Path(events_dir) / "events_train.pkl"
+            if events_pkl.exists():
+                print(f"[process] already preprocessed: {events_dir}", flush=True)
+                _set_status(stage="done", message="already processed",
+                            events_dir=events_dir, progress=1.0)
+                return
 
-            # Step 1: audio → MIDI via vendor pipeline
-            # Search recursively for every supported format; run the pipeline
-            # once per format that has at least one match in the folder.
+            pipe_dir  = ROOT / "vendor" / "all-in-one-ai-midi-pipeline"
+            midi_data = pipe_dir / "data" / "midi"
+
+            # Step 1: audio → MIDI (progress 0.0 → 0.35)
             audio_formats = ["*.wav", "*.mp3", "*.flac", "*.aiff", "*.aif", "*.m4a", "*.ogg"]
             audio_folder_path = Path(audio_folder)
             formats_found = [
@@ -224,29 +259,69 @@ def process(req: ProcessRequest):
             if req.normalize_key:
                 extra += ["--normalize-key"]
 
-            for fmt in formats_found:
+            # Snapshot what already exists so we export ONLY this run's tracks
+            midi_tracks_before = set(midi_data.iterdir()) if midi_data.exists() else set()
+
+            # Count total audio files so the stem-watcher knows the denominator
+            total_audio = sum(
+                len(list(audio_folder_path.rglob(fmt))) for fmt in formats_found
+            )
+            stems_dir = pipe_dir / "data" / "stems" / "htdemucs_6s"
+            stems_before = set(stems_dir.iterdir()) if stems_dir.exists() else set()
+
+            _set_status(message="step 1/3: audio → MIDI", progress=0.02)
+
+            # Background thread: watch for new stem folders → update progress 0.02→0.35
+            _step1_done = threading.Event()
+            def _watch_stems():
+                while not _step1_done.is_set():
+                    if stems_dir.exists():
+                        new_stems = len([d for d in stems_dir.iterdir()
+                                         if d not in stems_before and d.is_dir()])
+                        if total_audio > 0:
+                            frac = min(new_stems / total_audio, 1.0)
+                            _set_status(progress=0.02 + 0.33 * frac)
+                    _step1_done.wait(timeout=2.0)
+
+            watcher = threading.Thread(target=_watch_stems, daemon=True)
+            watcher.start()
+
+            n_fmts = len(formats_found)
+            for fi, fmt in enumerate(formats_found):
                 pattern = str(audio_folder_path / "**" / fmt)
                 rc, tail = _run_streaming(
                     ["python", "pipeline.py", "run-batch", pattern] + extra,
                     cwd=pipe_dir,
                 )
                 if rc != 0:
+                    _step1_done.set()
                     if not _cancelled.is_set():
                         _set_status(stage="error",
                                     error=f"vendor pipeline failed ({fmt}): " + " | ".join(tail[-3:]))
                     return
 
-            # Step 2: export MIDI
-            rc, tail = _run_streaming(
-                ["python", "pipeline.py", "export-midi", "--out", midi_dir],
-                cwd=pipe_dir,
-            )
-            if rc != 0:
-                if not _cancelled.is_set():
-                    _set_status(stage="error", error="MIDI export failed: " + " | ".join(tail[-3:]))
-                return
+            _step1_done.set()
+            watcher.join(timeout=3.0)
 
-            # Step 3: preprocess → events
+            # Step 2: copy only THIS run's MIDI files (progress 0.35 → 0.40)
+            _set_status(message="step 2/3: export MIDI", progress=0.35)
+            import shutil
+            new_midi_tracks = [
+                d for d in (midi_data.iterdir() if midi_data.exists() else [])
+                if d not in midi_tracks_before and d.is_dir()
+            ]
+            if not new_midi_tracks:
+                _set_status(stage="error", error="no new MIDI tracks produced — check audio files")
+                return
+            out_path = Path(midi_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+            for track_dir in new_midi_tracks:
+                for mid in track_dir.glob("*.mid"):
+                    shutil.copy2(mid, out_path / mid.name)
+            print(f"[process] exported {len(new_midi_tracks)} tracks to {midi_dir}", flush=True)
+
+            # Step 3: preprocess → events (progress 0.40 → 1.0)
+            _set_status(message="step 3/3: preprocessing", progress=0.40)
             pre_args = [
                 PYTHON, str(ROOT / "training" / "pre.py"),
                 "--midi_folder", midi_dir,
@@ -261,15 +336,21 @@ def process(req: ProcessRequest):
                 if _disc_path.exists():
                     pre_args += ["--discriminator", str(_disc_path)]
                     print(f"[process] discriminator: {_disc_name}", flush=True)
+                    # Pass stems dir so the combined CNN+scalar head is used
+                    _stems_dir = pipe_dir / "data" / "stems" / "htdemucs_6s"
+                    if _stems_dir.exists():
+                        pre_args += ["--stems_dir", str(_stems_dir)]
+                        print(f"[process] stems_dir: {_stems_dir}", flush=True)
                     break
 
-            rc, tail = _run_streaming(pre_args, cwd=ROOT)
+            rc, tail = _run_streaming(pre_args, cwd=ROOT, parse_fn=_parse_preprocess_line)
             if rc != 0:
                 if not _cancelled.is_set():
                     _set_status(stage="error", error="preprocessing failed: " + " | ".join(tail[-3:]))
                 return
 
-            _set_status(stage="done", message="processing complete")
+            _set_status(stage="done", message="processing complete",
+                        events_dir=events_dir, progress=1.0)
         finally:
             _cancelled.clear()
             _job_lock.release()

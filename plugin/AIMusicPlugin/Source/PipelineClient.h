@@ -8,6 +8,7 @@ struct PipelineStatus
     int    epoch      = -1;
     int    totalEpochs= -1;
     double valLoss    = -1.0;
+    float  progress   = -1.f; // 0–1 during preprocessing, -1 otherwise
     juce::String error;
 };
 
@@ -54,6 +55,9 @@ public:
 
     // Returns the SEQ_LEN the checkpoint was trained with, or 0 on failure
     int fetchCheckpointInfo (const juce::String& ckptPath);
+
+    // Returns path to most recently created events folder, or empty string
+    juce::String fetchLatestEvents();
 
 private:
     juce::String baseUrl;

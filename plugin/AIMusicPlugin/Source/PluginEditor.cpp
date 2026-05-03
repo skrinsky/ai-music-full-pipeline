@@ -862,15 +862,7 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
         proc.selectedTracks = buildTracksString();
         proc.startProcess (proc.audioFolder);
     };
-    btnTrain.onClick = [this] {
-        if (! proc.isTrainingDataReady()) {
-            localErrorMessage = "No training data, run \"Process Audio\" first.";
-            updateStatusLabel();
-            return;
-        }
-        localErrorMessage.clear();
-        proc.startTrain();
-    };
+    btnTrain.onClick = [this] { browseEventsAndTrain(); };
     addAndMakeVisible (btnRunProcess);
     addAndMakeVisible (btnTrain);
 
@@ -1138,6 +1130,21 @@ void AIMusicEditor::paint (juce::Graphics& g)
     // "Preview" — mauve pulse while playing (matches dark theme palette)
     if (proc.isPreviewPlaying())
         drawPulse (btnPreview, juce::Colour (0xffcba6f7), juce::Colour (0xffe0b8ff));
+
+    // ── Preprocessing progress bar ────────────────────────────────────────────
+    auto& ps = proc.lastStatus;
+    if (ps.stage == "processing" && ps.progress >= 0.f)
+    {
+        juce::Rectangle<int> barBounds (lblStatus.getX(),
+                                        lblStatus.getBottom() + 1,
+                                        lblStatus.getWidth(),
+                                        4);
+        g.setColour (juce::Colour (0xff313244));
+        g.fillRoundedRectangle (barBounds.toFloat(), 2.f);
+        auto filled = barBounds.withWidth (juce::roundToInt (barBounds.getWidth() * ps.progress));
+        g.setColour (kAcc);
+        g.fillRoundedRectangle (filled.toFloat(), 2.f);
+    }
 }
 
 void AIMusicEditor::resized()
@@ -1478,6 +1485,35 @@ void AIMusicEditor::browseCheckpoint()
                 proc.loadCheckpointInfo();
                 updateTokenWarning();
             }
+        });
+}
+
+void AIMusicEditor::browseEventsAndTrain()
+{
+    // Default to the most recently created events folder; fall back to runs/events/
+    auto latest   = proc.fetchLatestEvents();
+    auto startDir = latest.isNotEmpty()
+                        ? juce::File (latest)
+                        : juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+
+    auto chooser = std::make_shared<juce::FileChooser> (
+        "Select events folder to train on", startDir);
+
+    chooser->launchAsync (juce::FileBrowserComponent::openMode |
+                          juce::FileBrowserComponent::canSelectDirectories,
+        [this, chooser] (const juce::FileChooser& fc)
+        {
+            auto folder = fc.getResult();
+            if (! folder.isDirectory()) return;
+
+            if (! folder.getChildFile ("events_train.pkl").existsAsFile())
+            {
+                localErrorMessage = "Selected folder has no events_train.pkl — run Process Audio first.";
+                updateStatusLabel();
+                return;
+            }
+            localErrorMessage.clear();
+            proc.startTrain (folder.getFullPathName());
         });
 }
 

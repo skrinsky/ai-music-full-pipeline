@@ -55,9 +55,11 @@ PipelineStatus PipelineClient::getStatus()
         auto ep   = obj->getProperty ("epoch");
         auto vl   = obj->getProperty ("val_loss");
         auto te   = obj->getProperty ("total_epochs");
+        auto pr   = obj->getProperty ("progress");
         if (! ep.isVoid())  s.epoch       = (int) ep;
         if (! vl.isVoid())  s.valLoss     = (double) vl;
         if (! te.isVoid())  s.totalEpochs = (int) te;
+        if (! pr.isVoid())  s.progress    = (float) (double) pr;
     }
     return s;
 }
@@ -159,6 +161,19 @@ bool PipelineClient::fetchPreviewWav (const juce::String& jobId,
     wavData.reset();
     stream->readIntoMemoryBlock (wavData);
     return wavData.getSize() > 0;
+}
+
+juce::String PipelineClient::fetchLatestEvents()
+{
+    auto resp = get ("/latest_events");
+    if (resp.isEmpty()) return {};
+    auto json = juce::JSON::parse (resp);
+    if (auto* obj = json.getDynamicObject())
+    {
+        auto val = obj->getProperty ("events_dir");
+        if (! val.isVoid()) return val.toString();
+    }
+    return {};
 }
 
 bool PipelineClient::fetchMidi (const juce::String& jobId, juce::MemoryBlock& midiData)

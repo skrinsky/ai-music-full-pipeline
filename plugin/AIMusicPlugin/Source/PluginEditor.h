@@ -76,6 +76,7 @@ private:
     juce::String buildTracksString() const;
     void browseFolder (bool startAfterSelect = false);
     void browseCheckpoint();
+    void browseEventsAndTrain();
     void makeKnob (juce::Slider&, double min, double max, double def, double step = 0.0);
     void savePreset();
     void loadPreset();
