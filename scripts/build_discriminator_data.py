@@ -74,7 +74,7 @@ FEATURE_NAMES = [
 ]
 N_FEATURES = len(FEATURE_NAMES)
 
-AUGMENTATIONS = [
+AUGMENTATIONS_GUITAR = [
     "clean",
     "dist_light",
     "dist_crunch",
@@ -84,6 +84,26 @@ AUGMENTATIONS = [
     "dist_light+reverb_room",
     "dist_heavy+reverb_hall",
 ]
+
+# Bass rarely has reverb in real recordings — bias toward distortion/grit
+AUGMENTATIONS_BASS = [
+    "clean",
+    "dist_light",
+    "dist_crunch",
+    "dist_heavy",
+    "dist_light",
+    "dist_crunch",
+    "dist_heavy",
+    "reverb_room",   # subtle cab room is realistic; hall is not
+]
+
+AUGMENTATIONS_OTHER = AUGMENTATIONS_GUITAR  # keys/synth/pads can have reverb
+
+AUGMENTATIONS_BY_CATEGORY = {
+    "guitar": AUGMENTATIONS_GUITAR,
+    "bass":   AUGMENTATIONS_BASS,
+    "other":  AUGMENTATIONS_OTHER,
+}
 
 SF2_CANDIDATES = [
     "/usr/share/sounds/sf2/FluidR3_GM.sf2",
@@ -409,11 +429,12 @@ def _process_stem_audio(stem_audio, category, midi_path, track_dir, sr,
     gt_notes   = get_gt_notes(midi_path)
     if not gt_notes:
         return []
-    stem_local = STEM_LOCAL_ID[category]
+    stem_local   = STEM_LOCAL_ID[category]
+    augmentations = AUGMENTATIONS_BY_CATEGORY.get(category, AUGMENTATIONS_GUITAR)
     # Apply amp sim once (before augmentations — same model, varied conditions)
     amped = apply_nam_amp(stem_audio, sr, category)
     results    = []
-    for aug_name in AUGMENTATIONS:
+    for aug_name in augmentations:
         augmented = apply_aug(amped, sr, aug_name)
         with tempfile.TemporaryDirectory() as tmpdir:
             wav_path = os.path.join(tmpdir, "aug.wav")
