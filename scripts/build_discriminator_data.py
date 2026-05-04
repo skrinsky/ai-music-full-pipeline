@@ -109,16 +109,61 @@ def find_sf2() -> str:
 _DEMUCS_SOURCES = ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano']
 _DEMUCS_TARGET_STEMS = {'guitar', 'bass', 'other'}  # stems we care about
 
-# Worker-local model (loaded once per process via initializer)
+# Worker-local models (loaded once per process via initializer)
 _demucs_model = None
+_nam_models: dict = {}   # category → nam model (or None)
 
 
-def _init_worker(use_demucs: bool):
+def _init_worker(use_demucs: bool, nam_dir: str = ""):
     global _demucs_model
     if use_demucs:
         from demucs.pretrained import get_model
         _demucs_model = get_model('htdemucs_6s')
         _demucs_model.eval()
+
+    if nam_dir:
+        import json as _json
+        from pathlib import Path as _Path
+        manifest_path = _Path(nam_dir) / "manifest.json"
+        if manifest_path.exists():
+            manifest = _json.loads(manifest_path.read_text())
+            try:
+                from nam.models import init_from_nam as _init_nam
+                for cat, paths in manifest.items():
+                    if paths:
+                        with open(paths[0]) as f:
+                            cfg = _json.load(f)
+                        m = _init_nam(cfg)
+                        m.eval()
+                        _nam_models[cat] = m
+                        print(f"  NAM loaded: {cat} → {_Path(paths[0]).name}", flush=True)
+            except Exception as e:
+                print(f"  NAM load failed (skipping amp sim): {e}", flush=True)
+
+
+def apply_nam_amp(audio: np.ndarray, sr: int, category: str) -> np.ndarray:
+    """Run audio through the NAM amp model for this instrument category.
+    Falls back to identity if no model loaded for this category."""
+    model = _nam_models.get(category) or _nam_models.get("other")
+    if model is None:
+        return audio
+    import torch
+    nam_sr = 48000
+    if sr != nam_sr:
+        n_out = int(len(audio) * nam_sr / sr)
+        a48 = np.interp(np.linspace(0, len(audio) - 1, n_out),
+                        np.arange(len(audio)), audio).astype(np.float32)
+    else:
+        a48 = audio.astype(np.float32)
+    with torch.no_grad():
+        out48 = model(torch.from_numpy(a48).unsqueeze(0)).squeeze(0).numpy()
+    if sr != nam_sr:
+        out = np.interp(np.linspace(0, len(out48) - 1, len(audio)),
+                        np.arange(len(out48)), out48).astype(np.float32)
+    else:
+        out = out48
+    peak = np.abs(out).max()
+    return out / peak if peak > 0 else out
 
 
 def separate_with_demucs(mix_mono: np.ndarray, sr: int = 44100) -> dict:
@@ -353,14 +398,16 @@ def run_basic_pitch(wav_path: str):
 
 def _process_stem_audio(stem_audio, category, midi_path, track_dir, sr,
                          n_mels, n_frames, hop_length):
-    """Run augmentations → basic-pitch → align → extract features+patches for one stem."""
+    """Run amp sim → augmentations → basic-pitch → align → extract features+patches."""
     gt_notes   = get_gt_notes(midi_path)
     if not gt_notes:
         return []
     stem_local = STEM_LOCAL_ID[category]
+    # Apply amp sim once (before augmentations — same model, varied conditions)
+    amped = apply_nam_amp(stem_audio, sr, category)
     results    = []
     for aug_name in AUGMENTATIONS:
-        augmented = apply_aug(stem_audio, sr, aug_name)
+        augmented = apply_aug(amped, sr, aug_name)
         with tempfile.TemporaryDirectory() as tmpdir:
             wav_path = os.path.join(tmpdir, "aug.wav")
             scipy.io.wavfile.write(wav_path, sr,
@@ -525,12 +572,17 @@ def main():
                          "for both basic-pitch and mel patches (recommended). "
                          "Pass --no-use-demucs to use the legacy clean-stem pipeline.")
     ap.add_argument("--no-use-demucs", dest="use_demucs", action="store_false")
+    ap.add_argument("--nam_dir", default="data/nam_models",
+                    help="Directory containing .nam captures + manifest.json "
+                         "(from make nam-fetch). Leave blank to skip amp sim.")
     args = ap.parse_args()
 
     sf2 = args.sf2 or (find_sf2() if not args.use_demucs else "")
     if not args.use_demucs:
         print(f"Soundfont: {sf2}")
+    nam_dir = args.nam_dir if Path(args.nam_dir).exists() else ""
     print(f"Pipeline: {'demucs (htdemucs_6s)' if args.use_demucs else 'legacy clean-stem+bleed'}")
+    print(f"Amp sim:  {'NAM (' + args.nam_dir + ')' if nam_dir else 'disabled (run make nam-fetch to enable)'}")
     print(f"Mel patches: {args.n_mels} bands × {args.n_frames} frames (hop={args.hop_length})")
 
     slakh_dir  = Path(args.slakh_dir)
@@ -548,7 +600,7 @@ def main():
     _init_h5(out_path, N_FEATURES, args.n_mels, args.n_frames)
 
     ctx = multiprocessing.get_context("fork")
-    initargs = (args.use_demucs,)
+    initargs = (args.use_demucs, nam_dir)
     with ctx.Pool(processes=args.workers,
                   initializer=_init_worker, initargs=initargs) as pool:
         for results in pool.imap_unordered(process_track, tasks, chunksize=1):
