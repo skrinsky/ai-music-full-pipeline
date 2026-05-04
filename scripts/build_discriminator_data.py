@@ -621,7 +621,7 @@ def main():
 
     random.seed(args.seed)
     sample = random.sample(track_dirs, min(args.n_tracks, len(track_dirs)))
-    print(f"Processing {len(sample)} tracks, {len(AUGMENTATIONS)} augmentations each")
+    print(f"Processing {len(sample)} tracks, {len(AUGMENTATIONS_GUITAR)}/{len(AUGMENTATIONS_BASS)} augs (guitar/bass) each")
 
     tasks    = [(str(td), sf2, args.n_mels, args.n_frames, args.hop_length) for td in sample]
     out_path = Path(args.out)
