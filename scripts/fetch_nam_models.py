@@ -15,36 +15,58 @@ import sys
 import urllib.request
 from pathlib import Path
 
-# Stable .nam files from the official NAM repo test suite
-NAM_TEST_BASE = "https://raw.githubusercontent.com/sdatkinson/neural-amp-modeler/main/tests/resources"
+NAM_RAW = "https://raw.githubusercontent.com"
+NAM_TEST  = f"{NAM_RAW}/sdatkinson/neural-amp-modeler/main/tests/resources/models/identity"
+COMMUNITY = f"{NAM_RAW}/pelennor2170/NAM_models/main"
 
-# Community captures from pelennor2170/NAM_models — bass + guitar selections
-COMMUNITY_BASE = "https://raw.githubusercontent.com/pelennor2170/NAM_models/main"
+def _enc(s):
+    return s.replace(" ", "%20")
 
 MODELS = [
-    # (filename, url, category)
-    # Official test fixtures — small WaveNet models, always available
-    ("test_bass.nam",   f"{NAM_TEST_BASE}/test_model_v1.nam",   "bass"),
-    ("test_guitar.nam", f"{NAM_TEST_BASE}/test_model_v2.nam",   "guitar"),
-]
+    # (save_as, url, category)
+    # Official NAM test WaveNet — always available, used as fallback
+    ("wavenet_guitar.nam",
+     f"{NAM_TEST}/wavenet_standard.nam", "guitar"),
 
-# Community models — try these, skip silently if unavailable
-COMMUNITY_MODELS = [
-    ("ampeg_svt_bass.nam",     f"{COMMUNITY_BASE}/Bass/Ampeg_SVT.nam",          "bass"),
-    ("darkglass_b7k_bass.nam", f"{COMMUNITY_BASE}/Bass/Darkglass_B7K.nam",      "bass"),
-    ("jcm800_guitar.nam",      f"{COMMUNITY_BASE}/Guitar/Marshall_JCM800.nam",  "guitar"),
-    ("5150_guitar.nam",        f"{COMMUNITY_BASE}/Guitar/EVH_5150.nam",         "guitar"),
+    # Community bass captures (pedal/preamp style but real bass tones)
+    ("tech21_dug_bass.nam",
+     f"{COMMUNITY}/{_enc('Jason Z Tech21 dUg DP3X bass preamp pedal all dimed no shift.nam')}",
+     "bass"),
+    ("hm2_bass.nam",
+     f"{COMMUNITY}/{_enc('Jason Z Boss HM2 v1 kinda bass heavy with medium distortion pure everything turned all the way up tone.nam')}",
+     "bass"),
+
+    # Community guitar captures
+    ("ceriatone_guitar.nam",
+     f"{COMMUNITY}/{_enc('George B Ceriatone King Kong Channel 1 60s mode.nam')}",
+     "guitar"),
+    ("5150_guitar.nam",
+     f"{COMMUNITY}/{_enc('Helga B 5150 BlockLetter - NoBoost.nam')}",
+     "guitar"),
 ]
 
 
 def fetch(url: str, dest: Path) -> bool:
+    import ssl
     try:
         urllib.request.urlretrieve(url, dest)
-        # Verify it's valid JSON (.nam files are JSON)
+    except Exception:
+        # Fall back to unverified SSL (safe for public GitHub raw URLs)
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(url, context=ctx) as r:
+                dest.write_bytes(r.read())
+        except Exception:
+            if dest.exists():
+                dest.unlink()
+            return False
+    try:
         with open(dest) as f:
             json.load(f)
         return True
-    except Exception as e:
+    except Exception:
         if dest.exists():
             dest.unlink()
         return False
@@ -59,7 +81,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     ok = 0
-    for fname, url, category in MODELS + COMMUNITY_MODELS:
+    for fname, url, category in MODELS:
         dest = out / fname
         if dest.exists():
             print(f"  already exists: {fname}")
