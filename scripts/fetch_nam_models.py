@@ -15,9 +15,11 @@ import sys
 import urllib.request
 from pathlib import Path
 
-NAM_RAW = "https://raw.githubusercontent.com"
-NAM_TEST  = f"{NAM_RAW}/sdatkinson/neural-amp-modeler/main/tests/resources/models/identity"
-COMMUNITY = f"{NAM_RAW}/pelennor2170/NAM_models/main"
+NAM_RAW      = "https://raw.githubusercontent.com"
+NAM_TEST     = f"{NAM_RAW}/sdatkinson/neural-amp-modeler/main/tests/resources/models/identity"
+COMMUNITY    = f"{NAM_RAW}/pelennor2170/NAM_models/main"
+RTNEURAL_NAM = f"{NAM_RAW}/jatinchowdhury18/RTNeural-NAM/main"
+PLUGIN_TEST  = f"{NAM_RAW}/sdatkinson/NeuralAmpModelerPlugin/main/REAPER"
 
 def _enc(s):
     return s.replace(" ", "%20")
@@ -28,20 +30,53 @@ MODELS = [
     ("wavenet_guitar.nam",
      f"{NAM_TEST}/wavenet_standard.nam", "guitar"),
 
-    # Community bass captures (pedal/preamp style but real bass tones)
+    # ── Bass captures (pedal/preamp style — 3 distinct tones) ──────────────
     ("tech21_dug_bass.nam",
      f"{COMMUNITY}/{_enc('Jason Z Tech21 dUg DP3X bass preamp pedal all dimed no shift.nam')}",
      "bass"),
     ("hm2_bass.nam",
      f"{COMMUNITY}/{_enc('Jason Z Boss HM2 v1 kinda bass heavy with medium distortion pure everything turned all the way up tone.nam')}",
      "bass"),
+    ("hm2_btfo_bass.nam",
+     f"{COMMUNITY}/{_enc('Jason Z Boss HM2BTFO heavy distortion meant to be standalone less bass more honk.nam')}",
+     "bass"),
 
-    # Community guitar captures
+    # ── Guitar captures (9 diverse amp/character types) ────────────────────
     ("ceriatone_guitar.nam",
      f"{COMMUNITY}/{_enc('George B Ceriatone King Kong Channel 1 60s mode.nam')}",
      "guitar"),
     ("5150_guitar.nam",
      f"{COMMUNITY}/{_enc('Helga B 5150 BlockLetter - NoBoost.nam')}",
+     "guitar"),
+    ("fender_twinverb_guitar.nam",
+     f"{COMMUNITY}/{_enc('Tim R Fender TwinVerb Norm Bright.nam')}",
+     "guitar"),
+    ("dirty_shirley_guitar.nam",
+     f"{COMMUNITY}/{_enc('Sascha S DirtyShirleyMini_Clean_B1_M6_T7_MV10_G4.nam')}",
+     "guitar"),
+    ("magnatone_guitar.nam",
+     f"{COMMUNITY}/{_enc('Tim R Magnatone Super 59 Mkii Ch1 Norm.nam')}",
+     "guitar"),
+    ("jcm2000_guitar.nam",
+     f"{COMMUNITY}/{_enc('Tim R JCM2000 Crunch.nam')}",
+     "guitar"),
+    ("vox_ac15_guitar.nam",
+     f"{COMMUNITY}/{_enc('Phillipe P VOXAC15-TopBoost.nam')}",
+     "guitar"),
+    ("sovtek_mig50_guitar.nam",
+     f"{COMMUNITY}/{_enc('Mikhail K Sovtek MIG50.nam')}",
+     "guitar"),
+    ("5152_lead_guitar.nam",
+     f"{COMMUNITY}/{_enc('Tim R 5152 Lead No Boost.nam')}",
+     "guitar"),
+    ("orange_rockerverb_guitar.nam",
+     f"{COMMUNITY}/{_enc('Tom C Axe FX 2 Orange Rockerverb.nam')}",
+     "guitar"),
+    ("mesa_dc5_guitar.nam",
+     f"{RTNEURAL_NAM}/{_enc('OB1 Mesa DC-5 PM.nam')}",
+     "guitar"),
+    ("plugin_test_guitar.nam",
+     f"{PLUGIN_TEST}/model.nam",
      "guitar"),
 ]
 

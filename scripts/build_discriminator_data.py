@@ -111,7 +111,7 @@ _DEMUCS_TARGET_STEMS = {'guitar', 'bass', 'other'}  # stems we care about
 
 # Worker-local models (loaded once per process via initializer)
 _demucs_model = None
-_nam_models: dict = {}   # category → nam model (or None)
+_nam_models: dict = {}   # category → list of nam models
 
 
 def _init_worker(use_demucs: bool, nam_dir: str = ""):
@@ -130,23 +130,30 @@ def _init_worker(use_demucs: bool, nam_dir: str = ""):
             try:
                 from nam.models import init_from_nam as _init_nam
                 for cat, paths in manifest.items():
-                    if paths:
-                        with open(paths[0]) as f:
-                            cfg = _json.load(f)
-                        m = _init_nam(cfg)
-                        m.eval()
-                        _nam_models[cat] = m
-                        print(f"  NAM loaded: {cat} → {_Path(paths[0]).name}", flush=True)
+                    loaded = []
+                    for p in paths:
+                        try:
+                            with open(p) as f:
+                                cfg = _json.load(f)
+                            m = _init_nam(cfg)
+                            m.eval()
+                            loaded.append(m)
+                        except Exception as e:
+                            print(f"  NAM skip {_Path(p).name}: {e}", flush=True)
+                    if loaded:
+                        _nam_models[cat] = loaded
+                        print(f"  NAM loaded: {cat} → {len(loaded)} model(s)", flush=True)
             except Exception as e:
                 print(f"  NAM load failed (skipping amp sim): {e}", flush=True)
 
 
 def apply_nam_amp(audio: np.ndarray, sr: int, category: str) -> np.ndarray:
-    """Run audio through the NAM amp model for this instrument category.
-    Falls back to identity if no model loaded for this category."""
-    model = _nam_models.get(category) or _nam_models.get("other")
-    if model is None:
+    """Run audio through a randomly-selected NAM amp model for this instrument category.
+    Falls back to identity if no models loaded for this category."""
+    models = _nam_models.get(category) or _nam_models.get("other")
+    if not models:
         return audio
+    model = random.choice(models)
     import torch
     nam_sr = 48000
     if sr != nam_sr:
