@@ -85,16 +85,24 @@ AUGMENTATIONS_GUITAR = [
     "dist_heavy+reverb_hall",
 ]
 
-# Bass rarely has reverb in real recordings — bias toward distortion/grit
+# Bass: no hall reverb, heavy LPF coverage so the CNN learns that
+# transients at low cutoffs are still real notes (not HF-dependent).
 AUGMENTATIONS_BASS = [
     "clean",
     "dist_light",
     "dist_crunch",
     "dist_heavy",
-    "dist_light",
-    "dist_crunch",
-    "dist_heavy",
-    "reverb_room",   # subtle cab room is realistic; hall is not
+    "lpf_700",               # sub-bass only — almost no harmonics
+    "lpf_1k",                # strong rolloff
+    "lpf_2k",                # typical bass cab rolloff
+    "lpf_4k",                # gentle rolloff
+    "dist_light+lpf_4k",     # light grit, natural rolloff
+    "dist_light+lpf_2k",     # light grit, heavier rolloff
+    "dist_crunch+lpf_1k",    # crunchy but very band-limited
+    "dist_heavy+lpf_1k",     # driven amp, heavy cab rolloff
+    "dist_heavy+lpf_700",    # maximal — saturated into near-sine, onset only
+    "dist_crunch+lpf_700",   # crunch into sub-bass
+    "reverb_room",           # subtle cab room
 ]
 
 AUGMENTATIONS_OTHER = AUGMENTATIONS_GUITAR  # keys/synth/pads can have reverb
@@ -248,13 +256,25 @@ def apply_reverb(audio: np.ndarray, sr: int, rt60: float, wet: float = 0.3) -> n
     return ((1 - wet) * audio + wet * wet_s).astype(audio.dtype)
 
 
+def apply_lpf(audio: np.ndarray, sr: int, cutoff_hz: float, order: int = 4) -> np.ndarray:
+    nyq = sr / 2.0
+    norm = min(cutoff_hz / nyq, 0.99)
+    b, a = scipy.signal.butter(order, norm, btype="low")
+    return scipy.signal.lfilter(b, a, audio).astype(np.float32)
+
+
 def apply_aug(audio: np.ndarray, sr: int, aug_name: str) -> np.ndarray:
+    import re
     a = audio.astype(np.float32)
     if "dist_light"  in aug_name: a = apply_distortion(a,  6.0)
     if "dist_crunch" in aug_name: a = apply_distortion(a, 18.0)
     if "dist_heavy"  in aug_name: a = apply_distortion(a, 35.0)
     if "reverb_room" in aug_name: a = apply_reverb(a, sr, 0.3)
     if "reverb_hall" in aug_name: a = apply_reverb(a, sr, 1.2)
+    m = re.search(r"lpf_(\d+)(k?)", aug_name)
+    if m:
+        hz = int(m.group(1)) * (1000 if m.group(2) == "k" else 1)
+        a = apply_lpf(a, sr, float(hz))
     return a
 
 
