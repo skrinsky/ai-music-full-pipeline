@@ -455,12 +455,18 @@ def score_events_with_audio(
 
     probs = np.where(has_audio, probs_combined, probs_scalar)
 
-    # Blend with basic-pitch confidence: keep if EITHER the discriminator
-    # OR basic-pitch itself was confident. Helps recover real notes the
-    # discriminator under-scores due to training domain mismatch.
+    # Blend with basic-pitch confidence per instrument — keep if EITHER the
+    # discriminator OR basic-pitch was confident. Scale varies by instrument:
+    # bass/other get a higher scale (fewer real false positives from demucs),
+    # guitar is more conservative (more bleed false positives).
     if bp_blend_scale > 0:
         bp_conf = feats[:, 0]   # amplitude col = basic-pitch confidence 0-1
-        probs   = np.maximum(probs, bp_conf * bp_blend_scale)
+        inst_ids = np.array([int(e[1]) for e in events])
+        scales = np.where(inst_ids == 4, bp_blend_scale,            # bass
+                 np.where(inst_ids == 3, 1.0,                     # other/synth — trust bp_conf directly
+                 np.where(inst_ids == 2, bp_blend_scale * 0.6,    # guitar — more conservative
+                 0.0)))                                            # passthrough
+        probs = np.maximum(probs, bp_conf * scales)
 
     filtered = []
     for i, ev in enumerate(events):
