@@ -29,16 +29,32 @@ DISC_PATH  = REPO / "runs" / "discriminator" / "combined_model.pt"
 STEMS_ROOT = REPO / "vendor" / "all-in-one-ai-midi-pipeline" / "data" / "stems" / "htdemucs_6s"
 
 
-def events_to_midi(events, tempo_bpm, config=None):
+def events_to_midi(events, tempo_bpm, config=None, src_pm=None):
+    """Convert event list back to PrettyMIDI.
+
+    If src_pm is provided, copies track name/program/is_drum from the
+    original so the output is a faithful subset of the source.
+    """
     if config is None:
         config = _DEFAULT_CONFIG
 
     pm = pretty_midi.PrettyMIDI(resolution=960, initial_tempo=float(tempo_bpm))
+    if src_pm is not None:
+        # Preserve the original tempo map (may be more complex than a single BPM)
+        pm._tick_scales = src_pm._tick_scales
+        pm.resolution   = src_pm.resolution
+
+    # Build name→(program, is_drum) lookup from source if available
+    src_meta = {}
+    if src_pm is not None:
+        for s in src_pm.instruments:
+            src_meta[s.name.lower()] = (s.program, s.is_drum)
+
     tracks = []
-    for name in config.names:
-        inst = pretty_midi.Instrument(program=0, name=name)
-        inst.is_drum = (config.drum_idx is not None and
-                        config.names.index(name) == config.drum_idx)
+    for idx, name in enumerate(config.names):
+        prog, is_drum = src_meta.get(name.lower(),
+                        (0, config.drum_idx is not None and idx == config.drum_idx))
+        inst = pretty_midi.Instrument(program=prog, is_drum=is_drum, name=name)
         tracks.append(inst)
 
     spb = 60.0 / tempo_bpm
@@ -57,6 +73,7 @@ def events_to_midi(events, tempo_bpm, config=None):
 
 
 def process(midi_path: Path, disc, threshold: float, bp_blend: float = 0.8):
+    src_pm = pretty_midi.PrettyMIDI(str(midi_path))
     events, tempo, _, _ = extract_multitrack_events(str(midi_path))
 
     track_name = midi_path.stem.split("__")[0]
@@ -80,22 +97,10 @@ def process(midi_path: Path, disc, threshold: float, bp_blend: float = 0.8):
     print(f"{midi_path.name} [{mode}]: {len(events)} → {len(filtered)} "
           f"({removed} removed, {100*len(filtered)/max(len(events),1):.0f}% kept)")
 
-    # Combined filtered MIDI
     out_path = midi_path.parent / (midi_path.stem + "_filtered.mid")
-    pm = events_to_midi(filtered, tempo)
+    pm = events_to_midi(filtered, tempo, src_pm=src_pm)
     pm.write(str(out_path))
     print(f"  → {out_path}")
-
-    # Per-instrument MIDIs
-    config = _DEFAULT_CONFIG
-    for inst_idx, name in enumerate(config.names):
-        inst_events = [e for e in filtered if int(e[1]) == inst_idx]
-        if not inst_events:
-            continue
-        inst_pm = events_to_midi(inst_events, tempo)
-        inst_path = midi_path.parent / f"{midi_path.stem}_{name}_filtered.mid"
-        inst_pm.write(str(inst_path))
-        print(f"  → {inst_path.name}  ({len(inst_events)} notes)")
 
 
 def main():
