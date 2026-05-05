@@ -401,7 +401,7 @@ def score_events_with_audio(
         return score_events(events, model, tempo_bpm, threshold)
 
     feats  = _build_event_features(events, tempo_bpm)
-    scalar_t = torch.tensor(feats, dtype=torch.float32)
+    scalar_t = torch.tensor(feats[:, :model.n_scalar], dtype=torch.float32)
 
     # Per-instrument: load raw audio + log-mel (lazily, None = unavailable)
     stem_audios: dict = {}   # inst_idx → (mono float32, sr)
@@ -439,8 +439,8 @@ def score_events_with_audio(
                 spec_np[i]   = patches[j]
                 has_audio[i] = True
 
-        # SPE features (fill columns 12-14 of feats)
-        if inst_idx in stem_audios:
+        # SPE features (fill columns 12-14 of feats) — only if model has them
+        if inst_idx in stem_audios and model.n_scalar >= 15:
             _audio, _sr = stem_audios[inst_idx]
             _spe = spe_note_features(_audio, _sr, onsets)
             for j, i in enumerate(idxs):
