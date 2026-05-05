@@ -384,6 +384,7 @@ def score_events_with_audio(
     track_name: str,
     threshold: float = 0.35,
     hop_length: int = 512,
+    bp_blend_scale: float = 0.8,
 ) -> list:
     """Filter events using the combined CNN+scalar head when stem WAVs are available.
 
@@ -453,6 +454,13 @@ def score_events_with_audio(
         probs_scalar   = model.predict_proba_scalar(scalar_t).numpy()
 
     probs = np.where(has_audio, probs_combined, probs_scalar)
+
+    # Blend with basic-pitch confidence: keep if EITHER the discriminator
+    # OR basic-pitch itself was confident. Helps recover real notes the
+    # discriminator under-scores due to training domain mismatch.
+    if bp_blend_scale > 0:
+        bp_conf = feats[:, 0]   # amplitude col = basic-pitch confidence 0-1
+        probs   = np.maximum(probs, bp_conf * bp_blend_scale)
 
     filtered = []
     for i, ev in enumerate(events):

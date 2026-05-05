@@ -56,7 +56,7 @@ def events_to_midi(events, tempo_bpm, config=None):
     return pm
 
 
-def process(midi_path: Path, disc, threshold: float):
+def process(midi_path: Path, disc, threshold: float, bp_blend: float = 0.8):
     events, tempo, _, _ = extract_multitrack_events(str(midi_path))
 
     track_name = midi_path.stem.split("__")[0]
@@ -68,6 +68,7 @@ def process(midi_path: Path, disc, threshold: float):
             stems_dir=STEMS_ROOT,
             track_name=track_name,
             threshold=threshold,
+            bp_blend_scale=bp_blend,
         )
         mode = "CNN+scalar"
     else:
@@ -88,21 +89,25 @@ def process(midi_path: Path, disc, threshold: float):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("midis", nargs="+")
-    ap.add_argument("--threshold", type=float, default=0.35)
+    ap.add_argument("--threshold",    type=float, default=0.35)
+    ap.add_argument("--bp_blend",     type=float, default=0.8,
+                    help="Scale basic-pitch confidence before max-blending with disc "
+                         "score. 0 = disable blend, 0.8 = default.")
     args = ap.parse_args()
 
     if not DISC_PATH.exists():
         sys.exit(f"Discriminator not found at {DISC_PATH}")
 
     disc = load_discriminator(str(DISC_PATH), device="cpu")
-    print(f"Loaded: {DISC_PATH.name}  threshold={args.threshold}  stems_root={'exists' if STEMS_ROOT.exists() else 'MISSING'}\n")
+    print(f"Loaded: {DISC_PATH.name}  threshold={args.threshold}  "
+          f"bp_blend={args.bp_blend}  stems_root={'exists' if STEMS_ROOT.exists() else 'MISSING'}\n")
 
     for p_str in args.midis:
         p = Path(p_str)
         if not p.exists():
             print(f"SKIP (not found): {p}")
             continue
-        process(p, disc, args.threshold)
+        process(p, disc, args.threshold, args.bp_blend)
 
 
 if __name__ == "__main__":
