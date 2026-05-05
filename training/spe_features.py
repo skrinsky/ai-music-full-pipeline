@@ -31,7 +31,6 @@ def spe_transients(
     hpf_hz: float = _HPF_HZ,
     block_size: int = _BLOCK,
     thresholds: tuple = _THRESHOLDS,
-    zero_thr: float = _ZERO_THR,
 ) -> tuple:
     """Run SPE on a mono audio array.
 
@@ -43,6 +42,12 @@ def spe_transients(
     nyq = sr / 2.0
     sos = scipy.signal.butter(4, min(hpf_hz / nyq, 0.9999), btype="high", output="sos")
     hp  = scipy.signal.sosfilt(sos, audio.astype(np.float64))
+
+    # Adaptive zero threshold: 5% of HPF-signal RMS so it scales with stem level.
+    # The ratio condition (curr*T > prev) is already scale-invariant; only this
+    # absolute floor needs to adapt to whatever level demucs outputs.
+    rms_hp   = float(np.sqrt(np.mean(hp ** 2)))
+    zero_thr = max(rms_hp * 0.05, 1e-6)
 
     N    = block_size * 2
     half = block_size
