@@ -809,6 +809,115 @@ struct MirrorUILAF : public juce::LookAndFeel_V4
     juce::Font getPopupMenuFont() override { return juce::Font (12.f); }
 };
 
+// ── Advanced Settings Panel ───────────────────────────────────────────────────
+struct AdvancedPanel : public juce::Component
+{
+    AIMusicProcessor& proc;
+
+    juce::Label        lblDisc        { {}, "Note Filter" };
+    juce::ToggleButton chkDisc        { "Enable" };
+    juce::Label        lblIntensity   { {}, "Intensity" };
+    juce::Slider       sldIntensity;
+    juce::Label        lblIntensityHint { {}, "low = gentle,  high = strict" };
+
+    juce::Label        lblSeq         { {}, "Seq Length (training)" };
+    juce::Slider       sldSeqLen;
+    juce::Label        lblSeqHint     { {}, "tokens per training window" };
+
+    static const juce::Colour kBg2;
+    static const juce::Colour kFg2;
+    static const juce::Colour kAcc2;
+
+    explicit AdvancedPanel (AIMusicProcessor& p) : proc (p)
+    {
+        setSize (320, 200);
+
+        auto styleLabel = [&] (juce::Label& l, bool small = false) {
+            l.setColour (juce::Label::textColourId, kFg2);
+            if (small) l.setFont (juce::Font (10.5f));
+            addAndMakeVisible (l);
+        };
+        auto styleSlider = [&] (juce::Slider& s) {
+            s.setSliderStyle (juce::Slider::LinearHorizontal);
+            s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 48, 18);
+            s.setColour (juce::Slider::textBoxTextColourId,       kFg2);
+            s.setColour (juce::Slider::thumbColourId,             kAcc2);
+            s.setColour (juce::Slider::trackColourId,             kAcc2.withAlpha (0.4f));
+            s.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colour (0xff313244));
+            s.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colours::transparentBlack);
+            addAndMakeVisible (s);
+        };
+
+        styleLabel (lblDisc);
+        chkDisc.setToggleState (proc.discIntensity > 0.0f, juce::dontSendNotification);
+        chkDisc.setColour (juce::ToggleButton::textColourId, kFg2);
+        chkDisc.onStateChange = [this] {
+            bool on = chkDisc.getToggleState();
+            sldIntensity.setEnabled (on);
+            proc.discIntensity = on ? (float) sldIntensity.getValue() : 0.0f;
+        };
+        addAndMakeVisible (chkDisc);
+
+        styleLabel (lblIntensity);
+        sldIntensity.setRange (0.01, 1.0, 0.01);
+        sldIntensity.setValue (proc.discIntensity > 0.0f ? (double) proc.discIntensity : 0.25,
+                               juce::dontSendNotification);
+        sldIntensity.setEnabled (proc.discIntensity > 0.0f);
+        sldIntensity.onValueChange = [this] {
+            if (chkDisc.getToggleState())
+                proc.discIntensity = (float) sldIntensity.getValue();
+        };
+        styleSlider (sldIntensity);
+        styleLabel (lblIntensityHint, true);
+
+        styleLabel (lblSeq);
+        sldSeqLen.setRange (128, 1024, 128);
+        sldSeqLen.setValue (proc.seqLen, juce::dontSendNotification);
+        sldSeqLen.onValueChange = [this] { proc.seqLen = (int) sldSeqLen.getValue(); };
+        styleSlider (sldSeqLen);
+        styleLabel (lblSeqHint, true);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (kBg2);
+        g.setColour (kFg2.withAlpha (0.15f));
+        g.drawHorizontalLine (getHeight() / 2, 12.f, (float) getWidth() - 12.f);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (14, 12);
+        int rowH  = 22, gap = 4;
+
+        // ── Note Filter section ───────────────────────────────────────────────
+        auto discRow = area.removeFromTop (rowH);
+        lblDisc    .setBounds (discRow.removeFromLeft (90));
+        chkDisc    .setBounds (discRow.removeFromLeft (70));
+        area.removeFromTop (gap);
+        auto intRow = area.removeFromTop (rowH);
+        lblIntensity.setBounds (intRow.removeFromLeft (68));
+        intRow.removeFromLeft (4);
+        sldIntensity.setBounds (intRow);
+        area.removeFromTop (2);
+        lblIntensityHint.setBounds (area.removeFromTop (14));
+
+        area.removeFromTop (10); // separator space
+
+        // ── Seq Length section ────────────────────────────────────────────────
+        lblSeq    .setBounds (area.removeFromTop (rowH));
+        area.removeFromTop (gap);
+        auto seqRow = area.removeFromTop (rowH);
+        sldSeqLen .setBounds (seqRow);
+        area.removeFromTop (2);
+        lblSeqHint.setBounds (area.removeFromTop (14));
+    }
+};
+
+const juce::Colour AdvancedPanel::kBg2  { 0xff1e1e2e };
+const juce::Colour AdvancedPanel::kFg2  { 0xffcdd6f4 };
+const juce::Colour AdvancedPanel::kAcc2 { 0xff89b4fa };
+
 AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     : AudioProcessorEditor (&p), proc (p),
       mirrorAnim     (std::make_unique<MirrorMirror>()),
@@ -866,61 +975,20 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     addAndMakeVisible (btnRunProcess);
     addAndMakeVisible (btnTrain);
 
-    // ── Advanced settings ─────────────────────────────────────────────────────
+    // ── Advanced settings button ──────────────────────────────────────────────
     btnAdvanced.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff313244));
     btnAdvanced.setColour (juce::TextButton::textColourOffId, kFg);
     btnAdvanced.onClick = [this] {
-        advancedOpen = ! advancedOpen;
-        btnAdvanced.setButtonText (advancedOpen ? "Advanced ▴" : "Advanced ▾");
-        updateTabVisibility();
-        resized();
+        juce::DialogWindow::LaunchOptions opts;
+        opts.dialogTitle             = "Advanced Settings";
+        opts.content.setOwned        (new AdvancedPanel (proc));
+        opts.dialogBackgroundColour  = juce::Colour (0xff1e1e2e);
+        opts.useNativeTitleBar       = false;
+        opts.resizable               = false;
+        opts.componentToCentreAround = this;
+        opts.launchAsync();
     };
     addAndMakeVisible (btnAdvanced);
-
-    chkDiscriminator.setToggleState (proc.discIntensity > 0.0f, juce::dontSendNotification);
-    chkDiscriminator.setColour (juce::ToggleButton::textColourId, kFg);
-    chkDiscriminator.setLookAndFeel (smallToggleLAF.get());
-    chkDiscriminator.onStateChange = [this] {
-        bool on = chkDiscriminator.getToggleState();
-        sldDiscIntensity.setEnabled (on);
-        if (! on) proc.discIntensity = 0.0f;
-        else      proc.discIntensity = (float) sldDiscIntensity.getValue();
-    };
-    addAndMakeVisible (chkDiscriminator);
-
-    sldDiscIntensity.setRange (0.01, 1.0, 0.01);
-    sldDiscIntensity.setValue (proc.discIntensity > 0.0f ? (double) proc.discIntensity : 0.25, juce::dontSendNotification);
-    sldDiscIntensity.setSliderStyle (juce::Slider::LinearHorizontal);
-    sldDiscIntensity.setTextBoxStyle (juce::Slider::TextBoxRight, false, 40, 18);
-    sldDiscIntensity.setColour (juce::Slider::textBoxTextColourId,    kFg);
-    sldDiscIntensity.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colour (0xff313244));
-    sldDiscIntensity.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    sldDiscIntensity.setEnabled (proc.discIntensity > 0.0f);
-    sldDiscIntensity.onValueChange = [this] {
-        if (chkDiscriminator.getToggleState())
-            proc.discIntensity = (float) sldDiscIntensity.getValue();
-    };
-    addAndMakeVisible (sldDiscIntensity);
-
-    lblDiscIntensity.setText ("Intensity", juce::dontSendNotification);
-    lblDiscIntensity.setColour (juce::Label::textColourId, kFg);
-    lblDiscIntensity.setFont (juce::Font (11.5f));
-    addAndMakeVisible (lblDiscIntensity);
-
-    sldSeqLen.setRange (128, 2048, 128);
-    sldSeqLen.setValue (proc.seqLen, juce::dontSendNotification);
-    sldSeqLen.setSliderStyle (juce::Slider::LinearHorizontal);
-    sldSeqLen.setTextBoxStyle (juce::Slider::TextBoxRight, false, 48, 18);
-    sldSeqLen.setColour (juce::Slider::textBoxTextColourId,    kFg);
-    sldSeqLen.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colour (0xff313244));
-    sldSeqLen.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    sldSeqLen.onValueChange = [this] { proc.seqLen = (int) sldSeqLen.getValue(); };
-    addAndMakeVisible (sldSeqLen);
-
-    lblSeqLen.setText ("Seq Length", juce::dontSendNotification);
-    lblSeqLen.setColour (juce::Label::textColourId, kFg);
-    lblSeqLen.setFont (juce::Font (11.5f));
-    addAndMakeVisible (lblSeqLen);
 
     // ── Tab 2: Generate ───────────────────────────────────────────────────────
     lblCkpt.setText (proc.ckptPath.isNotEmpty() ? proc.ckptPath : "No checkpoint selected",
@@ -1263,27 +1331,7 @@ void AIMusicEditor::resized()
         btnRow.removeFromLeft (6);
         btnTrain.setBounds (btnRow.removeFromLeft (90));
         area.removeFromTop (8);
-
-        // ── Advanced disclosure ───────────────────────────────────────────────
         btnAdvanced.setBounds (area.removeFromTop (22).removeFromLeft (110));
-
-        if (advancedOpen)
-        {
-            area.removeFromTop (6);
-            // Note Filter row: toggle + intensity slider
-            auto discRow = area.removeFromTop (22);
-            chkDiscriminator .setBounds (discRow.removeFromLeft (90));
-            discRow.removeFromLeft (6);
-            lblDiscIntensity .setBounds (discRow.removeFromLeft (56));
-            sldDiscIntensity .setBounds (discRow);
-
-            area.removeFromTop (6);
-            // Seq Length row
-            auto seqRow = area.removeFromTop (22);
-            lblSeqLen.setBounds (seqRow.removeFromLeft (72));
-            seqRow.removeFromLeft (6);
-            sldSeqLen.setBounds (seqRow);
-        }
     }
     else
     {
@@ -1357,12 +1405,6 @@ void AIMusicEditor::updateTabVisibility()
              &chkLeadVox, &chkHarmVox, &chkGuitar, &chkBass, &chkDrums, &chkOther,
              &btnRunProcess, &btnTrain, &btnAdvanced })
         c->setVisible (onProcess);
-
-    bool showAdv = onProcess && advancedOpen;
-    for (juce::Component* c : std::initializer_list<juce::Component*> {
-             &chkDiscriminator, &sldDiscIntensity, &lblDiscIntensity,
-             &sldSeqLen, &lblSeqLen })
-        c->setVisible (showAdv);
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &lblCkpt, &btnBrowseCkpt,
@@ -1696,12 +1738,6 @@ void AIMusicEditor::refreshFromProcessor()
                        juce::dontSendNotification);
     lblFolder.setText (proc.audioFolder.isNotEmpty() ? proc.audioFolder : "No folder selected",
                        juce::dontSendNotification);
-
-    bool discOn = (proc.discIntensity > 0.0f);
-    chkDiscriminator.setToggleState (discOn, juce::dontSendNotification);
-    sldDiscIntensity.setValue (discOn ? (double) proc.discIntensity : 0.25, juce::dontSendNotification);
-    sldDiscIntensity.setEnabled (discOn);
-    sldSeqLen.setValue (proc.seqLen, juce::dontSendNotification);
 
     if (proc.selectedTracks.isEmpty())
     {

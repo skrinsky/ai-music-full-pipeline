@@ -48,13 +48,7 @@ private:
     juce::TextButton   btnGenerate    { "Generate" };
 
     // ── Advanced settings (Process & Train tab) ───────────────────────────────
-    juce::TextButton   btnAdvanced        { "Advanced ▾" };
-    bool               advancedOpen       { false };
-    juce::ToggleButton chkDiscriminator   { "Note Filter" };
-    juce::Slider       sldDiscIntensity;
-    juce::Label        lblDiscIntensity;
-    juce::Slider       sldSeqLen;
-    juce::Label        lblSeqLen;
+    juce::TextButton   btnAdvanced  { "Advanced ▾" };
 
     // ── Preset bar ────────────────────────────────────────────────────────────
     juce::TextButton btnSavePreset { "Save" };
