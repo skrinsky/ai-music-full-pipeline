@@ -24,7 +24,8 @@ public:
     // Fire-and-forget POST calls — server runs jobs in background threads
     bool postProcess (const juce::String& audioFolder,
                       const juce::String& tracks = {},
-                      bool normalizeKey = true);
+                      bool normalizeKey = true,
+                      float discIntensity = 0.0f);
 
     bool postTrain   (const juce::String& eventsDir  = "runs/events",
                       const juce::String& ckptPath   = "runs/checkpoints/es_model.pt",

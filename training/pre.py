@@ -1195,6 +1195,8 @@ def main():
                     help="Path to note discriminator .pt checkpoint (empty = disabled).")
     ap.add_argument("--disc_threshold", type=float, default=0.35,
                     help="Keep notes with P(TP) >= this threshold (default 0.35).")
+    ap.add_argument("--disc_bp_blend", type=float, default=0.8,
+                    help="Scale basic-pitch confidence for max-blend rescue (default 0.8).")
     ap.add_argument("--stems_dir", default="",
                     help="Path to htdemucs_6s stems root (enables combined CNN+scalar discriminator).")
     args = ap.parse_args()
@@ -1283,6 +1285,7 @@ def main():
                         stems_dir=Path(args.stems_dir),
                         track_name=track_name,
                         threshold=args.disc_threshold,
+                        bp_blend_scale=args.disc_bp_blend,
                     )
                 else:
                     from training.note_discriminator import score_events

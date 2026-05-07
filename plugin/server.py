@@ -137,6 +137,7 @@ class ProcessRequest(BaseModel):
     audio_folder: str
     tracks: str = ""
     normalize_key: bool = True
+    disc_intensity: float = 0.0   # 0 = off, 1.0 = max filtering
 
 
 class TrainRequest(BaseModel):
@@ -330,18 +331,24 @@ def process(req: ProcessRequest):
             if req.tracks:
                 pre_args += ["--tracks", req.tracks]
 
-            # Auto-use discriminator if checkpoint is present (combined model preferred)
-            for _disc_name in ("combined_model.pt", "model.pt"):
-                _disc_path = ROOT / "runs" / "discriminator" / _disc_name
-                if _disc_path.exists():
-                    pre_args += ["--discriminator", str(_disc_path)]
-                    print(f"[process] discriminator: {_disc_name}", flush=True)
-                    # Pass stems dir so the combined CNN+scalar head is used
-                    _stems_dir = pipe_dir / "data" / "stems" / "htdemucs_6s"
-                    if _stems_dir.exists():
-                        pre_args += ["--stems_dir", str(_stems_dir)]
-                        print(f"[process] stems_dir: {_stems_dir}", flush=True)
-                    break
+            # Use discriminator only when user requests it (disc_intensity > 0)
+            if req.disc_intensity > 0.0:
+                for _disc_name in ("combined_model.pt", "model.pt"):
+                    _disc_path = ROOT / "runs" / "discriminator" / _disc_name
+                    if _disc_path.exists():
+                        # Map intensity [0,1] → threshold and bp_blend
+                        _threshold = 0.10 + req.disc_intensity * 0.45
+                        _bp_blend  = 0.95 - req.disc_intensity * 0.15
+                        pre_args += ["--discriminator",   str(_disc_path),
+                                     "--disc_threshold",  str(round(_threshold, 4)),
+                                     "--disc_bp_blend",   str(round(_bp_blend,  4))]
+                        print(f"[process] discriminator: {_disc_name}  "
+                              f"intensity={req.disc_intensity:.2f}  "
+                              f"threshold={_threshold:.3f}  bp_blend={_bp_blend:.3f}", flush=True)
+                        _stems_dir = pipe_dir / "data" / "stems" / "htdemucs_6s"
+                        if _stems_dir.exists():
+                            pre_args += ["--stems_dir", str(_stems_dir)]
+                        break
 
             rc, tail = _run_streaming(pre_args, cwd=ROOT, parse_fn=_parse_preprocess_line)
             if rc != 0:

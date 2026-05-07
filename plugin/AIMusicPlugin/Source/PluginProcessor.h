@@ -55,6 +55,10 @@ public:
     bool   seedFromData   { true };
     bool   quantize       { true };
 
+    // Advanced settings
+    float  discIntensity  { 0.0f };  // 0 = off, 1 = max filtering
+    int    seqLen         { 512 };   // training sequence length
+
     double getHostBpm() const { return cachedBpm.load(); }
     int    loadCheckpointInfo();
     bool   isTrainingDataReady();

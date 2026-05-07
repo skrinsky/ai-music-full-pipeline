@@ -355,14 +355,14 @@ void AIMusicProcessor::startProcess (const juce::String& folder)
             tryLaunchServerFromRepoRoot (repoRoot);
     }
 
-    client.postProcess (folder, selectedTracks);
+    client.postProcess (folder, selectedTracks, true, discIntensity);
 }
 
 void AIMusicProcessor::startTrain (const juce::String& eventsDir)
 {
     if (eventsDir.isNotEmpty())
     {
-        client.postTrain (eventsDir, ckptPath, "auto", 200, 512);
+        client.postTrain (eventsDir, ckptPath, "auto", 200, seqLen);
         return;
     }
     auto startDir2 = juce::File (ckptPath.isNotEmpty() ? ckptPath : audioFolder);
@@ -370,7 +370,7 @@ void AIMusicProcessor::startTrain (const juce::String& eventsDir)
     auto dir       = repoRoot2.exists()
                          ? repoRoot2.getChildFile ("runs/events").getFullPathName()
                          : juce::String ("runs/events");
-    client.postTrain (dir, ckptPath, "auto", 200, 512);
+    client.postTrain (dir, ckptPath, "auto", 200, seqLen);
 }
 
 void AIMusicProcessor::startGenerate()
@@ -624,6 +624,8 @@ void AIMusicProcessor::getStateInformation (juce::MemoryBlock& destData)
     xml.setAttribute ("ckptPath",       ckptPath);
     xml.setAttribute ("audioFolder",    audioFolder);
     xml.setAttribute ("selectedTracks", selectedTracks);
+    xml.setAttribute ("discIntensity",  discIntensity);
+    xml.setAttribute ("seqLen",         seqLen);
     copyXmlToBinary (xml, destData);
 }
 
@@ -643,6 +645,8 @@ void AIMusicProcessor::setStateInformation (const void* data, int sizeInBytes)
     ckptPath        =         xml->getStringAttribute ("ckptPath",       ckptPath);
     audioFolder     =         xml->getStringAttribute ("audioFolder",    audioFolder);
     selectedTracks  =         xml->getStringAttribute ("selectedTracks", selectedTracks);
+    discIntensity   = (float) xml->getDoubleAttribute ("discIntensity",  discIntensity);
+    seqLen          =         xml->getIntAttribute    ("seqLen",         seqLen);
     if (onStateLoaded)
         juce::MessageManager::callAsync (onStateLoaded);
 }

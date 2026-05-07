@@ -66,12 +66,14 @@ PipelineStatus PipelineClient::getStatus()
 
 bool PipelineClient::postProcess (const juce::String& audioFolder,
                                   const juce::String& tracks,
-                                  bool normalizeKey)
+                                  bool normalizeKey,
+                                  float discIntensity)
 {
     auto* obj = new juce::DynamicObject();
-    obj->setProperty ("audio_folder",  audioFolder);
-    obj->setProperty ("tracks",        tracks);
-    obj->setProperty ("normalize_key", normalizeKey);
+    obj->setProperty ("audio_folder",   audioFolder);
+    obj->setProperty ("tracks",         tracks);
+    obj->setProperty ("normalize_key",  normalizeKey);
+    obj->setProperty ("disc_intensity", (double) discIntensity);
     auto resp = post ("/process", juce::JSON::toString (juce::var (obj)));
     return resp.contains ("started");
 }

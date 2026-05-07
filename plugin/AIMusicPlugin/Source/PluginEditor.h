@@ -47,6 +47,15 @@ private:
     juce::ToggleButton btnSeedFromData { "Seed from training data" };
     juce::TextButton   btnGenerate    { "Generate" };
 
+    // ── Advanced settings (Process & Train tab) ───────────────────────────────
+    juce::TextButton   btnAdvanced        { "Advanced ▾" };
+    bool               advancedOpen       { false };
+    juce::ToggleButton chkDiscriminator   { "Note Filter" };
+    juce::Slider       sldDiscIntensity;
+    juce::Label        lblDiscIntensity;
+    juce::Slider       sldSeqLen;
+    juce::Label        lblSeqLen;
+
     // ── Preset bar ────────────────────────────────────────────────────────────
     juce::TextButton btnSavePreset { "Save" };
     juce::TextButton btnLoadPreset { "Load" };
