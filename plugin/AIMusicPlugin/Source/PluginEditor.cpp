@@ -809,6 +809,69 @@ struct MirrorUILAF : public juce::LookAndFeel_V4
     juce::Font getPopupMenuFont() override { return juce::Font (12.f); }
 };
 
+// ── Key button LookAndFeel — paints an ornate gold key with purple gem ────────
+struct KeyButtonLAF : public juce::LookAndFeel_V4
+{
+    void drawButtonBackground (juce::Graphics& g, juce::Button& btn,
+                               const juce::Colour&, bool isOver, bool isDown) override
+    {
+        float w  = (float) btn.getWidth();
+        float h  = (float) btn.getHeight();
+        float cx = w * 0.5f, cy = h * 0.5f;
+
+        // Purple magic glow behind the key (matches mirror glow)
+        float ga = isDown ? 0.60f : (isOver ? 0.40f : 0.18f);
+        g.setColour (juce::Colour (0xff6633cc).withAlpha (ga));
+        g.fillEllipse (cx - w * 0.44f, cy - h * 0.44f, w * 0.88f, h * 0.88f);
+
+        // Key geometry — horizontal, bow on left
+        float kw    = w * 0.75f,  kh    = h * 0.44f;
+        float kx    = cx - kw * 0.46f;
+        float ky    = cy - kh * 0.5f;
+        float bowR  = kh * 0.5f;
+        float bowCx = kx + bowR,  bowCy = cy;
+        float sX1   = bowCx + bowR * 0.52f;
+        float sX2   = kx + kw;
+        float sH    = kh * 0.21f;   // shaft half-height
+
+        // Gold gradient (same colour stops as mirror frame)
+        auto makeGold = [&]() {
+            juce::ColourGradient gr (juce::Colour (0xffFFE566), cx, ky,
+                                     juce::Colour (0xff9A6B00), cx, ky + kh * 1.5f, false);
+            gr.addColour (0.30, juce::Colour (0xffFFD700));
+            gr.addColour (0.65, juce::Colour (0xffCE9E22));
+            return gr;
+        };
+
+        // ── bow ring ──────────────────────────────────────────────────────────
+        g.setGradientFill (makeGold());
+        g.drawEllipse (kx, ky, bowR * 2.f, kh, 2.3f);
+
+        // ── gem in bow (purple, filled + highlight) ───────────────────────────
+        float gemR = bowR * 0.36f;
+        g.setColour (juce::Colour (0xff8833bb));
+        g.fillEllipse (bowCx - gemR, bowCy - gemR, gemR * 2.f, gemR * 2.f);
+        // inner shimmer
+        g.setColour (juce::Colour (0xffcc88ff).withAlpha (0.75f));
+        g.fillEllipse (bowCx - gemR * 0.52f, bowCy - gemR * 0.72f, gemR * 0.52f, gemR * 0.52f);
+
+        // ── shaft ─────────────────────────────────────────────────────────────
+        g.setGradientFill (makeGold());
+        g.fillRect (juce::Rectangle<float> (sX1, cy - sH, sX2 - sX1, sH * 2.f));
+
+        // ── bit — two downward teeth at shaft end ─────────────────────────────
+        float tw = kw * 0.085f;
+        g.fillRect (juce::Rectangle<float> (sX2 - tw * 3.4f, cy + sH, tw, kh * 0.32f));
+        g.fillRect (juce::Rectangle<float> (sX2 - tw * 1.7f, cy + sH, tw, kh * 0.22f));
+
+        // ── thin gold outline on shaft top edge for depth ─────────────────────
+        g.setColour (juce::Colour (0xffFFE566).withAlpha (0.5f));
+        g.drawLine (sX1, cy - sH, sX2, cy - sH, 0.8f);
+    }
+
+    void drawButtonText (juce::Graphics&, juce::TextButton&, bool, bool) override {}
+};
+
 // ── Advanced Settings Panel ───────────────────────────────────────────────────
 struct AdvancedPanel : public juce::Component
 {
@@ -923,7 +986,8 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
       mirrorAnim     (std::make_unique<MirrorMirror>()),
       mirrorUILAF       (std::make_unique<MirrorUILAF>()),
       smallToggleLAF    (std::make_unique<SmallToggleLAF>()),
-      mirrorKnobLAF     (std::make_unique<MirrorKnobLAF>())
+      mirrorKnobLAF     (std::make_unique<MirrorKnobLAF>()),
+      keyButtonLAF      (std::make_unique<KeyButtonLAF>())
 {
     setSize (480, 440);
     setLookAndFeel (mirrorUILAF.get());   // global — cascades to all children without explicit LAF
@@ -975,9 +1039,9 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     addAndMakeVisible (btnRunProcess);
     addAndMakeVisible (btnTrain);
 
-    // ── Advanced settings button ──────────────────────────────────────────────
-    btnAdvanced.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff313244));
-    btnAdvanced.setColour (juce::TextButton::textColourOffId, kFg);
+    // ── Advanced settings button (key icon) ───────────────────────────────────
+    btnAdvanced.setLookAndFeel (keyButtonLAF.get());
+    btnAdvanced.setTooltip ("Advanced settings");
     btnAdvanced.onClick = [this] {
         juce::DialogWindow::LaunchOptions opts;
         opts.dialogTitle             = "Advanced Settings";
@@ -1331,7 +1395,7 @@ void AIMusicEditor::resized()
         btnRow.removeFromLeft (6);
         btnTrain.setBounds (btnRow.removeFromLeft (90));
         area.removeFromTop (8);
-        btnAdvanced.setBounds (area.removeFromTop (22).removeFromLeft (110));
+        btnAdvanced.setBounds (area.removeFromTop (28).removeFromLeft (28));
     }
     else
     {

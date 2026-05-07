@@ -67,6 +67,7 @@ private:
     std::unique_ptr<juce::LookAndFeel> mirrorUILAF;
     std::unique_ptr<juce::LookAndFeel> smallToggleLAF;
     std::unique_ptr<juce::LookAndFeel> mirrorKnobLAF;
+    std::unique_ptr<juce::LookAndFeel> keyButtonLAF;
     juce::String prevStage;
     bool         prevIsError { false };
     juce::String localErrorMessage;  // client-side errors that survive the server status poll
