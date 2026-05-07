@@ -815,58 +815,64 @@ struct KeyButtonLAF : public juce::LookAndFeel_V4
     void drawButtonBackground (juce::Graphics& g, juce::Button& btn,
                                const juce::Colour&, bool isOver, bool isDown) override
     {
-        float w  = (float) btn.getWidth();
-        float h  = (float) btn.getHeight();
+        float w = (float) btn.getWidth(), h = (float) btn.getHeight();
         float cx = w * 0.5f, cy = h * 0.5f;
 
-        // Purple magic glow behind the key (matches mirror glow)
-        float ga = isDown ? 0.60f : (isOver ? 0.40f : 0.18f);
+        // Purple magic glow (matches mirror)
+        float ga = isDown ? 0.65f : (isOver ? 0.42f : 0.20f);
         g.setColour (juce::Colour (0xff6633cc).withAlpha (ga));
-        g.fillEllipse (cx - w * 0.44f, cy - h * 0.44f, w * 0.88f, h * 0.88f);
+        g.fillEllipse (2.f, 2.f, w - 4.f, h - 4.f);
 
-        // Key geometry — horizontal, bow on left
-        float kw    = w * 0.75f,  kh    = h * 0.44f;
-        float kx    = cx - kw * 0.46f;
-        float ky    = cy - kh * 0.5f;
-        float bowR  = kh * 0.5f;
-        float bowCx = kx + bowR,  bowCy = cy;
-        float sX1   = bowCx + bowR * 0.52f;
-        float sX2   = kx + kw;
-        float sH    = kh * 0.21f;   // shaft half-height
+        // ── key geometry (horizontal, bow left, bit right) ────────────────────
+        // bow
+        float bowR  = h * 0.34f;           // outer radius
+        float holeR = bowR * 0.46f;         // inner hole radius
+        float bowCx = w * 0.27f, bowCy = cy;
+        // shaft
+        float sY1   = cy - h * 0.10f;      // shaft top
+        float sY2   = cy + h * 0.10f;      // shaft bottom
+        float sX0   = bowCx + bowR * 0.82f; // shaft left
+        float sX1   = w  - w * 0.10f;      // shaft right (before teeth)
+        // bit teeth (down from shaft bottom)
+        float tw    = w  * 0.095f;          // tooth width
+        float t1H   = h  * 0.26f;           // tall tooth height
+        float t2H   = h  * 0.18f;           // short tooth height
+        float t1X   = sX1 - tw * 2.9f;
+        float t2X   = sX1 - tw * 1.2f;
 
-        // Gold gradient (same colour stops as mirror frame)
-        auto makeGold = [&]() {
-            juce::ColourGradient gr (juce::Colour (0xffFFE566), cx, ky,
-                                     juce::Colour (0xff9A6B00), cx, ky + kh * 1.5f, false);
+        // Gold gradient
+        auto gold = [&]() {
+            juce::ColourGradient gr (juce::Colour (0xffFFE566), cx, bowCy - bowR,
+                                     juce::Colour (0xff9A6B00), cx, bowCy + bowR * 1.6f, false);
             gr.addColour (0.30, juce::Colour (0xffFFD700));
-            gr.addColour (0.65, juce::Colour (0xffCE9E22));
+            gr.addColour (0.68, juce::Colour (0xffCE9E22));
             return gr;
         };
 
-        // ── bow ring ──────────────────────────────────────────────────────────
-        g.setGradientFill (makeGold());
-        g.drawEllipse (kx, ky, bowR * 2.f, kh, 2.3f);
-
-        // ── gem in bow (purple, filled + highlight) ───────────────────────────
-        float gemR = bowR * 0.36f;
+        // ── filled bow ring (outer filled, hole punched with bg) ──────────────
+        g.setGradientFill (gold());
+        g.fillEllipse (bowCx - bowR, bowCy - bowR, bowR * 2.f, bowR * 2.f);
+        // punch hole
+        g.setColour (juce::Colour (0xff1e1e2e));
+        g.fillEllipse (bowCx - holeR, bowCy - holeR, holeR * 2.f, holeR * 2.f);
+        // gem in hole
+        float gemR = holeR * 0.62f;
         g.setColour (juce::Colour (0xff8833bb));
         g.fillEllipse (bowCx - gemR, bowCy - gemR, gemR * 2.f, gemR * 2.f);
-        // inner shimmer
-        g.setColour (juce::Colour (0xffcc88ff).withAlpha (0.75f));
-        g.fillEllipse (bowCx - gemR * 0.52f, bowCy - gemR * 0.72f, gemR * 0.52f, gemR * 0.52f);
+        g.setColour (juce::Colour (0xffcc88ff).withAlpha (0.70f));
+        g.fillEllipse (bowCx - gemR * 0.5f, bowCy - gemR * 0.72f, gemR * 0.5f, gemR * 0.46f);
 
         // ── shaft ─────────────────────────────────────────────────────────────
-        g.setGradientFill (makeGold());
-        g.fillRect (juce::Rectangle<float> (sX1, cy - sH, sX2 - sX1, sH * 2.f));
+        g.setGradientFill (gold());
+        g.fillRect (juce::Rectangle<float> (sX0, sY1, sX1 - sX0, sY2 - sY1));
 
-        // ── bit — two downward teeth at shaft end ─────────────────────────────
-        float tw = kw * 0.085f;
-        g.fillRect (juce::Rectangle<float> (sX2 - tw * 3.4f, cy + sH, tw, kh * 0.32f));
-        g.fillRect (juce::Rectangle<float> (sX2 - tw * 1.7f, cy + sH, tw, kh * 0.22f));
+        // ── bit teeth ─────────────────────────────────────────────────────────
+        g.fillRect (juce::Rectangle<float> (t1X, sY2, tw, t1H));
+        g.fillRect (juce::Rectangle<float> (t2X, sY2, tw, t2H));
 
-        // ── thin gold outline on shaft top edge for depth ─────────────────────
-        g.setColour (juce::Colour (0xffFFE566).withAlpha (0.5f));
-        g.drawLine (sX1, cy - sH, sX2, cy - sH, 0.8f);
+        // ── highlight edge on shaft ───────────────────────────────────────────
+        g.setColour (juce::Colour (0xffFFE566).withAlpha (0.45f));
+        g.drawLine (sX0, sY1, sX1, sY1, 0.9f);
     }
 
     void drawButtonText (juce::Graphics&, juce::TextButton&, bool, bool) override {}
@@ -1339,9 +1345,11 @@ void AIMusicEditor::resized()
 {
     auto area = getLocalBounds().reduced (12);
 
-    // Preset Save/Load — top-right corner of the title strip
+    // Title strip — key (upper-left) and Save/Load (upper-right)
     {
         auto titleStrip = getLocalBounds().removeFromTop (36).reduced (8, 7);
+        btnAdvanced.setBounds (titleStrip.removeFromLeft (26).withSizeKeepingCentre (26, 26));
+        titleStrip.removeFromLeft (4);
         btnLoadPreset.setBounds (titleStrip.removeFromRight (42));
         titleStrip.removeFromRight (4);
         btnSavePreset.setBounds (titleStrip.removeFromRight (42));
@@ -1395,7 +1403,6 @@ void AIMusicEditor::resized()
         btnRow.removeFromLeft (6);
         btnTrain.setBounds (btnRow.removeFromLeft (90));
         area.removeFromTop (8);
-        btnAdvanced.setBounds (area.removeFromTop (28).removeFromLeft (28));
     }
     else
     {
@@ -1467,7 +1474,7 @@ void AIMusicEditor::updateTabVisibility()
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              &lblFolder, &btnBrowseFolder, &lblInstruments,
              &chkLeadVox, &chkHarmVox, &chkGuitar, &chkBass, &chkDrums, &chkOther,
-             &btnRunProcess, &btnTrain, &btnAdvanced })
+             &btnRunProcess, &btnTrain })
         c->setVisible (onProcess);
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
