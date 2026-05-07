@@ -816,63 +816,71 @@ struct KeyButtonLAF : public juce::LookAndFeel_V4
                                const juce::Colour&, bool isOver, bool isDown) override
     {
         float w = (float) btn.getWidth(), h = (float) btn.getHeight();
-        float cx = w * 0.5f, cy = h * 0.5f;
+        float cy = h * 0.5f;
 
-        // Purple magic glow (matches mirror)
+        // Purple magic glow
         float ga = isDown ? 0.65f : (isOver ? 0.42f : 0.20f);
         g.setColour (juce::Colour (0xff6633cc).withAlpha (ga));
         g.fillEllipse (2.f, 2.f, w - 4.f, h - 4.f);
 
-        // ── key geometry (horizontal, bow left, bit right) ────────────────────
-        // bow
-        float bowR  = h * 0.34f;           // outer radius
-        float holeR = bowR * 0.46f;         // inner hole radius
-        float bowCx = w * 0.27f, bowCy = cy;
-        // shaft
-        float sY1   = cy - h * 0.10f;      // shaft top
-        float sY2   = cy + h * 0.10f;      // shaft bottom
-        float sX0   = bowCx + bowR * 0.82f; // shaft left
-        float sX1   = w  - w * 0.10f;      // shaft right (before teeth)
-        // bit teeth (down from shaft bottom)
-        float tw    = w  * 0.095f;          // tooth width
-        float t1H   = h  * 0.26f;           // tall tooth height
-        float t2H   = h  * 0.18f;           // short tooth height
-        float t1X   = sX1 - tw * 2.9f;
-        float t2X   = sX1 - tw * 1.2f;
+        // ── key geometry ──────────────────────────────────────────────────────
+        // Bow: anchor from left with padding so it never clips
+        float bowR  = h * 0.28f;                  // outer radius (~7px on 26px btn)
+        float bowCx = bowR + 3.0f;                // always safe from left edge
+        float bowCy = cy;
+        float holeR = bowR * 0.48f;
 
-        // Gold gradient
-        auto gold = [&]() {
-            juce::ColourGradient gr (juce::Colour (0xffFFE566), cx, bowCy - bowR,
-                                     juce::Colour (0xff9A6B00), cx, bowCy + bowR * 1.6f, false);
-            gr.addColour (0.30, juce::Colour (0xffFFD700));
-            gr.addColour (0.68, juce::Colour (0xffCE9E22));
+        // Shaft: runs from bow to right, vertically centered, thin
+        float sY1  = cy - h * 0.09f;              // shaft top
+        float sY2  = cy + h * 0.09f;              // shaft bottom
+        float sX0  = bowCx + bowR * 0.80f;        // connects into bow side
+        float sX1  = w - 3.0f;                    // right end
+
+        // Teeth: three rectangular notches projecting down from shaft bottom
+        // spaced evenly along the back half of the shaft
+        float shaftLen = sX1 - sX0;
+        float tw   = shaftLen * 0.155f;           // tooth width
+        float gap  = shaftLen * 0.10f;
+        float tX0  = sX0 + gap;
+        float tX1  = tX0 + tw + gap * 1.1f;
+        float tX2  = tX1 + tw + gap * 1.1f;
+
+        // Gold gradient (top-to-bottom, matches mirror frame)
+        auto makeGold = [&]() {
+            juce::ColourGradient gr (juce::Colour (0xffFFE566), bowCx, bowCy - bowR,
+                                     juce::Colour (0xff9A6B00), bowCx, bowCy + bowR * 1.7f, false);
+            gr.addColour (0.28, juce::Colour (0xffFFD700));
+            gr.addColour (0.65, juce::Colour (0xffCE9E22));
             return gr;
         };
 
-        // ── filled bow ring (outer filled, hole punched with bg) ──────────────
-        g.setGradientFill (gold());
+        // ── filled bow ring ───────────────────────────────────────────────────
+        g.setGradientFill (makeGold());
         g.fillEllipse (bowCx - bowR, bowCy - bowR, bowR * 2.f, bowR * 2.f);
-        // punch hole
+
+        // punch hole (background colour)
         g.setColour (juce::Colour (0xff1e1e2e));
         g.fillEllipse (bowCx - holeR, bowCy - holeR, holeR * 2.f, holeR * 2.f);
-        // gem in hole
-        float gemR = holeR * 0.62f;
+
+        // gem inside hole
+        float gemR = holeR * 0.60f;
         g.setColour (juce::Colour (0xff8833bb));
         g.fillEllipse (bowCx - gemR, bowCy - gemR, gemR * 2.f, gemR * 2.f);
-        g.setColour (juce::Colour (0xffcc88ff).withAlpha (0.70f));
-        g.fillEllipse (bowCx - gemR * 0.5f, bowCy - gemR * 0.72f, gemR * 0.5f, gemR * 0.46f);
+        g.setColour (juce::Colour (0xffcc88ff).withAlpha (0.72f));
+        g.fillEllipse (bowCx - gemR * 0.48f, bowCy - gemR * 0.70f, gemR * 0.48f, gemR * 0.44f);
 
         // ── shaft ─────────────────────────────────────────────────────────────
-        g.setGradientFill (gold());
+        g.setGradientFill (makeGold());
         g.fillRect (juce::Rectangle<float> (sX0, sY1, sX1 - sX0, sY2 - sY1));
 
-        // ── bit teeth ─────────────────────────────────────────────────────────
-        g.fillRect (juce::Rectangle<float> (t1X, sY2, tw, t1H));
-        g.fillRect (juce::Rectangle<float> (t2X, sY2, tw, t2H));
+        // ── three teeth projecting down from shaft ────────────────────────────
+        g.fillRect (juce::Rectangle<float> (tX0, sY2, tw, h * 0.24f));
+        g.fillRect (juce::Rectangle<float> (tX1, sY2, tw, h * 0.17f));
+        g.fillRect (juce::Rectangle<float> (tX2, sY2, tw, h * 0.21f));
 
-        // ── highlight edge on shaft ───────────────────────────────────────────
-        g.setColour (juce::Colour (0xffFFE566).withAlpha (0.45f));
-        g.drawLine (sX0, sY1, sX1, sY1, 0.9f);
+        // ── top highlight edge on shaft ───────────────────────────────────────
+        g.setColour (juce::Colour (0xffFFE566).withAlpha (0.50f));
+        g.drawLine (sX0, sY1, sX1, sY1, 1.0f);
     }
 
     void drawButtonText (juce::Graphics&, juce::TextButton&, bool, bool) override {}
