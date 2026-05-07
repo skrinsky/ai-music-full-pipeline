@@ -833,8 +833,8 @@ struct KeyButtonLAF : public juce::LookAndFeel_V4
         // Shaft: runs from bow to right, vertically centered, thin
         float sY1  = cy - h * 0.09f;              // shaft top
         float sY2  = cy + h * 0.09f;              // shaft bottom
-        float sX0  = bowCx + bowR * 0.80f;        // connects into bow side
-        float sX1  = w - 3.0f;                    // right end
+        float sX0  = bowCx + bowR * 0.55f;        // emerges from inside bow ring
+        float sX1  = w - 1.5f;                    // right end
 
         // Teeth: three rectangular notches projecting down from shaft bottom
         // spaced evenly along the back half of the shaft
