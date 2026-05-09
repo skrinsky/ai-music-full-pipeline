@@ -1544,8 +1544,8 @@ struct AdvancedPanel : public juce::Component
 
         // Fine-tune from checkpoint
         styleLabel (lblFineTune);
-        // Auto-fill with es_model.pt if current path is missing or blank
-        if (proc.repoRoot.exists() && ! juce::File (proc.pretrainCkpt).existsAsFile())
+        // Always default to the Lakh base model — not saved to DAW state so this runs fresh each session
+        if (proc.repoRoot.exists())
         {
             auto candidate = proc.repoRoot.getChildFile ("runs/checkpoints/es_model.pt");
             if (candidate.existsAsFile())

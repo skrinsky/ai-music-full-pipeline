@@ -646,7 +646,7 @@ void AIMusicProcessor::getStateInformation (juce::MemoryBlock& destData)
     xml.setAttribute ("discIntensity",  discIntensity);
     xml.setAttribute ("seqLen",         seqLen);
     xml.setAttribute ("projectName",    projectName);
-    xml.setAttribute ("pretrainCkpt",   pretrainCkpt);
+    // pretrainCkpt intentionally not saved — always re-derived from es_model.pt on dialog open
     copyXmlToBinary (xml, destData);
 }
 
@@ -669,7 +669,7 @@ void AIMusicProcessor::setStateInformation (const void* data, int sizeInBytes)
     discIntensity   = (float) xml->getDoubleAttribute ("discIntensity",  discIntensity);
     seqLen          =         xml->getIntAttribute    ("seqLen",         seqLen);
     projectName     =         xml->getStringAttribute ("projectName",    projectName);
-    pretrainCkpt    =         xml->getStringAttribute ("pretrainCkpt",   pretrainCkpt);
+    // pretrainCkpt not restored from state — derived fresh from es_model.pt each session
     if (onStateLoaded)
         juce::MessageManager::callAsync (onStateLoaded);
 }
