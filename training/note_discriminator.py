@@ -280,14 +280,20 @@ def score_events(
     model,
     tempo_bpm: float,
     threshold: float = 0.35,
-) -> list:
+    return_scores: bool = False,
+):
     """Filter pre.py events through the discriminator; return filtered list.
 
     Works with both NoteDiscriminator and CombinedNoteDiscriminator (uses
     scalar-only head for the combined model — no audio needed at this stage).
     Non-stem events (not guitar/bass/other) pass through unfiltered.
+
+    If return_scores=True, returns (filtered_list, scores_array) where
+    scores_array[i] is the blended score for events[i] (passthrough = 1.0).
     """
     if not events:
+        if return_scores:
+            return events, np.array([], dtype=np.float32)
         return events
 
     feats  = _build_event_features(events, tempo_bpm)
@@ -298,11 +304,15 @@ def score_events(
     else:
         probs = model.predict_proba(tensor).numpy()
 
+    local_ids = np.array([_INST_TO_LOCAL.get(int(ev[1]), -1) for ev in events])
     filtered = []
     for i, ev in enumerate(events):
-        local_id = _INST_TO_LOCAL.get(int(ev[1]), -1)
-        if local_id == -1 or probs[i] >= threshold:
+        if local_ids[i] == -1 or probs[i] >= threshold:
             filtered.append(ev)
+
+    if return_scores:
+        scores = np.where(local_ids == -1, 1.0, probs).astype(np.float32)
+        return filtered, scores
     return filtered
 
 
@@ -385,6 +395,7 @@ def score_events_with_audio(
     threshold: float = 0.35,
     hop_length: int = 512,
     bp_blend_scale: float = 0.8,
+    return_scores: bool = False,
 ) -> list:
     """Filter events using the combined CNN+scalar head when stem WAVs are available.
 
@@ -395,10 +406,12 @@ def score_events_with_audio(
     Non-stem instruments (vox, drums) always pass through unfiltered.
     """
     if not events:
+        if return_scores:
+            return events, np.array([], dtype=np.float32)
         return events
 
     if not isinstance(model, CombinedNoteDiscriminator):
-        return score_events(events, model, tempo_bpm, threshold)
+        return score_events(events, model, tempo_bpm, threshold, return_scores=return_scores)
 
     feats  = _build_event_features(events, tempo_bpm)
     scalar_t = torch.tensor(feats[:, :model.n_scalar], dtype=torch.float32)
@@ -467,9 +480,15 @@ def score_events_with_audio(
                  0.0)))                                            # passthrough
         probs = np.maximum(probs, bp_conf * scales)
 
+    local_ids = np.array([_INST_TO_LOCAL.get(int(ev[1]), -1) for ev in events])
     filtered = []
     for i, ev in enumerate(events):
-        local_id = _INST_TO_LOCAL.get(int(ev[1]), -1)
-        if local_id == -1 or probs[i] >= threshold:
+        if local_ids[i] == -1 or probs[i] >= threshold:
             filtered.append(ev)
+
+    if return_scores:
+        scores = np.where(local_ids == -1, 1.0, probs).astype(np.float32)
+        return filtered, scores
     return filtered
+
+

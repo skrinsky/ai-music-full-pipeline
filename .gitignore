@@ -44,3 +44,6 @@ manifests/
 # accidental backup files
 .gitignore.save
 .DS_Store
+
+# accidental no-extension data files at root
+/[ ]

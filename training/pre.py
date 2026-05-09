@@ -33,6 +33,7 @@ import sys
 import glob
 import json
 import random
+from pathlib import Path
 import pickle
 import argparse
 import itertools
@@ -1224,8 +1225,8 @@ def main():
     # Load discriminator if requested
     disc = None
     if args.discriminator:
-        from training.note_discriminator import NoteDiscriminator
-        disc = NoteDiscriminator.load(args.discriminator, device="cpu")
+        from training.note_discriminator import load_discriminator
+        disc = load_discriminator(args.discriminator, device="cpu")
         print(f"Discriminator loaded: {args.discriminator}  threshold={args.disc_threshold}")
 
     os.makedirs(DATA_FOLDER, exist_ok=True)
@@ -1265,6 +1266,8 @@ def main():
     skipped_not_bluesy = 0
     disc_notes_before = 0
     disc_notes_after  = 0
+    _PREVIEW_MAX_SONGS = 10000
+    disc_preview_songs = []   # filled when disc is active; saved to disc_preview.json
     for _pi, p in enumerate(paths):
         print(f"PREPROCESS {_pi + 1}/{len(paths)}", flush=True)
         try:
@@ -1277,22 +1280,56 @@ def main():
             # Optional: discriminator filtering
             if disc is not None:
                 disc_notes_before += len(ev)
+                want_preview = len(disc_preview_songs) < _PREVIEW_MAX_SONGS
+                ev_raw = list(ev) if want_preview else None   # snapshot before filtering
                 if args.stems_dir:
                     from training.note_discriminator import score_events_with_audio
                     track_name = Path(p).stem.split("__")[0]
-                    ev = score_events_with_audio(
+                    ev, _scores = score_events_with_audio(
                         ev, disc, tempo,
                         stems_dir=Path(args.stems_dir),
                         track_name=track_name,
                         threshold=args.disc_threshold,
                         bp_blend_scale=args.disc_bp_blend,
+                        return_scores=True,
                     )
                 else:
-                    from training.note_discriminator import score_events
-                    ev = score_events(ev, disc, tempo, threshold=args.disc_threshold)
+                    from training.note_discriminator import score_events, _INST_TO_LOCAL
+                    track_name = Path(p).stem
+                    # Score all events (threshold=0 → keep all, scores still computed)
+                    _, _scores = score_events(ev, disc, tempo,
+                                             threshold=0.0, return_scores=True)
+                    # Percentile-based filter: keep top (1 - disc_threshold) fraction.
+                    # This is robust when the model's scalar head is not well-calibrated.
+                    keep_frac  = max(0.10, 1.0 - args.disc_threshold)
+                    scored_pairs = [(i, float(_scores[i])) for i in range(len(ev))
+                                    if _INST_TO_LOCAL.get(int(ev[i][1]), -1) != -1]
+                    n_keep = max(1, int(len(scored_pairs) * keep_frac))
+                    keep_set = {idx for idx, _ in
+                                sorted(scored_pairs, key=lambda x: x[1], reverse=True)[:n_keep]}
+                    ev = [ev[i] for i in range(len(ev))
+                          if _INST_TO_LOCAL.get(int(ev[i][1]), -1) == -1 or i in keep_set]
                 disc_notes_after += len(ev)
                 if not ev:
                     raise RuntimeError('No events remain after discriminator filtering.')
+                # Collect scored notes for the piano-roll preview (first N songs only)
+                # _scores aligns 1:1 with ev_raw (all notes before filtering)
+                if want_preview and ev_raw and len(_scores) == len(ev_raw):
+                    disc_preview_songs.append({
+                        "name": track_name,
+                        "tempo_bpm": round(float(tempo), 2),
+                        "notes": [
+                            {
+                                "t":    round(float(e[0]), 4),
+                                "dur":  round(float(e[4]) * 60.0 / float(tempo), 4),
+                                "p":    int(e[2]),
+                                "v":    int(e[3]),
+                                "inst": int(e[1]),
+                                "score": round(float(_scores[i]), 3),
+                            }
+                            for i, e in enumerate(ev_raw)
+                        ],
+                    })
 
             # Optional: Blues Filter
             if args.blues_only and not is_track_bluesy(ev, tempo, config=config):
@@ -1317,6 +1354,14 @@ def main():
 
     if not any(song_meta[p][0] for p in song_meta):
         raise RuntimeError("No events extracted. Check your MIDI folder & mapping heuristics.")
+
+    # Save discriminator preview sidecar if we collected scored songs
+    if disc_preview_songs:
+        import json as _json
+        _preview_path = Path(args.data_folder) / "disc_preview.json"
+        with open(_preview_path, "w") as _f:
+            _json.dump({"songs": disc_preview_songs}, _f)
+        print(f"Saved discriminator preview ({len(disc_preview_songs)} songs) → {_preview_path}")
 
     # Determine augmentation ranges from config
     aug_transposes = config.aug_transposes
