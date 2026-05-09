@@ -57,7 +57,9 @@ _status: dict = {
     "val_loss": None,
     "error": None,
     "progress": None,      # 0.0–1.0 during preprocessing, None otherwise
+    "batch_progress": None,  # 0.0–1.0 within current training epoch
     "events_dir": None,    # path to preprocessed events folder after processing
+    "ckpt_path":  None,    # path to checkpoint written when training completes
     "daw_insert": None,    # 'reaper' | 'ableton' | '*_error' | 'unsupported' | None
 }
 
@@ -113,14 +115,20 @@ def _run_streaming(cmd: list[str], cwd: Path, parse_fn=None):
 _EPOCH_RE = re.compile(
     r"Epoch\s+(\d+).*?val:\s+loss=([\d.]+)", re.IGNORECASE
 )
-
+_BATCH_RE      = re.compile(r"^BATCH_PROGRESS\s+(\d+)/(\d+)$")
 _PREPROCESS_RE = re.compile(r"^PREPROCESS\s+(\d+)/(\d+)$")
 
 
 def _parse_train_line(line: str):
     m = _EPOCH_RE.search(line)
     if m:
-        _set_status(epoch=int(m.group(1)), val_loss=float(m.group(2)))
+        _set_status(epoch=int(m.group(1)), val_loss=float(m.group(2)),
+                    batch_progress=0.0)
+        return
+    m2 = _BATCH_RE.match(line)
+    if m2:
+        done, total = int(m2.group(1)), int(m2.group(2))
+        _set_status(batch_progress=done / total if total > 0 else 0.0)
 
 
 def _parse_preprocess_line(line: str):
@@ -138,6 +146,8 @@ class ProcessRequest(BaseModel):
     tracks: str = ""
     normalize_key: bool = True
     disc_intensity: float = 0.0   # 0 = off, 1.0 = max filtering
+    project_name: str = ""        # if set, derives all output paths from runs/{project}/
+    files_to_skip: list = []      # filenames (with ext) to use existing stems for
 
 
 class TrainRequest(BaseModel):
@@ -146,6 +156,8 @@ class TrainRequest(BaseModel):
     device: str = "auto"
     epochs: int = 200
     seq_len: int = 512
+    project_name: str = ""        # if set, overrides events_dir and ckpt_path
+    pretrain_ckpt: str = ""       # if set, resume/fine-tune from this checkpoint
 
 
 class GenerateRequest(BaseModel):
@@ -159,6 +171,7 @@ class GenerateRequest(BaseModel):
     grid_straight_step: int = 6
     grid_triplet_step: int = 0
     max_tokens: int = 512
+    project_name: str = ""
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -190,16 +203,36 @@ def status():
 
 @app.get("/latest_events")
 def latest_events():
-    """Return the most recently modified events folder that contains events_train.pkl."""
-    events_root = ROOT / "runs" / "events"
+    """Return the most recently modified events folder that contains events_train.pkl.
+
+    Scans both the new project layout (runs/{project}/events/) and the legacy
+    layout (runs/events/{slug}/) so old sessions still resolve correctly.
+    """
+    runs_root = ROOT / "runs"
     best_path, best_mtime = None, 0.0
-    if events_root.exists():
-        for pkl in events_root.rglob("events_train.pkl"):
+    if runs_root.exists():
+        for pkl in runs_root.rglob("events_train.pkl"):
             mtime = pkl.stat().st_mtime
             if mtime > best_mtime:
                 best_mtime = mtime
                 best_path = str(pkl.parent)
     return {"events_dir": best_path}
+
+
+@app.get("/disc_preview")
+def disc_preview(events_dir: str = ""):
+    """Return disc_preview.json from the given events dir (or the latest one)."""
+    import json as _json
+    if not events_dir:
+        resp = latest_events()
+        events_dir = resp.get("events_dir") or ""
+    if not events_dir:
+        raise HTTPException(404, "No events directory found")
+    p = Path(events_dir) / "disc_preview.json"
+    if not p.exists():
+        raise HTTPException(404, "No preview data — re-run processing with discriminator enabled")
+    with open(p) as f:
+        return _json.load(f)
 
 
 @app.post("/cancel")
@@ -210,7 +243,31 @@ def cancel():
         _current_proc.kill()  # SIGKILL — can't be ignored
     _set_status(stage="idle", message="cancelled", error=None,
                 epoch=None, val_loss=None)
+    # Shut down the server after the response is sent so it relaunches
+    # fresh (with any updated code) on the next plugin action.
+    def _shutdown():
+        import time
+        time.sleep(0.4)
+        os._exit(0)
+    threading.Thread(target=_shutdown, daemon=True).start()
     return {"cancelled": True}
+
+
+@app.get("/check_existing")
+def check_existing(audio_folder: str):
+    """Return filenames that already have stems from a previous run."""
+    stems_root = ROOT / "vendor" / "all-in-one-ai-midi-pipeline" / "data" / "stems" / "htdemucs_6s"
+    audio_formats = ["*.wav", "*.mp3", "*.flac", "*.aiff", "*.aif", "*.m4a", "*.ogg"]
+    folder = Path(audio_folder).resolve()
+    if not folder.exists():
+        return {"existing": []}
+    existing = [
+        f.name
+        for fmt in audio_formats
+        for f in folder.rglob(fmt)
+        if (stems_root / f.stem).exists()
+    ]
+    return {"existing": existing}
 
 
 @app.post("/process")
@@ -225,17 +282,12 @@ def process(req: ProcessRequest):
                         progress=0.0)
 
             audio_folder = str(Path(req.audio_folder).resolve())
-            slug         = re.sub(r"[^\w-]", "_", Path(audio_folder).name) or "default"
-            midi_dir     = str(ROOT / "out_midis" / slug)
-            events_dir   = str(ROOT / "runs" / "events" / slug)
-
-            # Skip all processing if this folder was already preprocessed
-            events_pkl = Path(events_dir) / "events_train.pkl"
-            if events_pkl.exists():
-                print(f"[process] already preprocessed: {events_dir}", flush=True)
-                _set_status(stage="done", message="already processed",
-                            events_dir=events_dir, progress=1.0)
-                return
+            if req.project_name.strip():
+                project_slug = re.sub(r"[^\w-]", "_", req.project_name.strip()) or "default"
+            else:
+                project_slug = re.sub(r"[^\w-]", "_", Path(audio_folder).name) or "default"
+            events_dir = str(ROOT / "runs" / project_slug / "events")
+            midi_dir   = str(ROOT / "runs" / project_slug / "midis")
 
             pipe_dir  = ROOT / "vendor" / "all-in-one-ai-midi-pipeline"
             midi_data = pipe_dir / "data" / "midi"
@@ -260,25 +312,22 @@ def process(req: ProcessRequest):
             if req.normalize_key:
                 extra += ["--normalize-key"]
 
-            # Snapshot what already exists so we export ONLY this run's tracks
-            midi_tracks_before = set(midi_data.iterdir()) if midi_data.exists() else set()
+            # Record time so we can detect tracks written/overwritten by THIS run
+            import time as _time
+            _run_start = _time.time()
 
-            # Count total audio files so the stem-watcher knows the denominator
-            total_audio = sum(
-                len(list(audio_folder_path.rglob(fmt))) for fmt in formats_found
-            )
+            # total_audio set after files_to_run is built (below)
             stems_dir = pipe_dir / "data" / "stems" / "htdemucs_6s"
-            stems_before = set(stems_dir.iterdir()) if stems_dir.exists() else set()
 
             _set_status(message="step 1/3: audio → MIDI", progress=0.02)
 
-            # Background thread: watch for new stem folders → update progress 0.02→0.35
+            # Background thread: watch for stem folders written by THIS run → progress 0.02→0.35
             _step1_done = threading.Event()
             def _watch_stems():
                 while not _step1_done.is_set():
                     if stems_dir.exists():
                         new_stems = len([d for d in stems_dir.iterdir()
-                                         if d not in stems_before and d.is_dir()])
+                                         if d.is_dir() and d.stat().st_mtime >= _run_start])
                         if total_audio > 0:
                             frac = min(new_stems / total_audio, 1.0)
                             _set_status(progress=0.02 + 0.33 * frac)
@@ -287,29 +336,39 @@ def process(req: ProcessRequest):
             watcher = threading.Thread(target=_watch_stems, daemon=True)
             watcher.start()
 
-            n_fmts = len(formats_found)
-            for fi, fmt in enumerate(formats_found):
-                pattern = str(audio_folder_path / "**" / fmt)
+            # Determine which files to actually run through the pipeline
+            skip_names = set(req.files_to_skip)
+            files_to_run = [
+                f for fmt in audio_formats
+                for f in audio_folder_path.rglob(fmt)
+                if f.name not in skip_names
+            ]
+            total_audio = len(files_to_run)
+
+            for audio_file in files_to_run:
                 rc, tail = _run_streaming(
-                    ["python", "pipeline.py", "run-batch", pattern] + extra,
+                    ["python", "pipeline.py", "run-batch", str(audio_file)] + extra,
                     cwd=pipe_dir,
                 )
                 if rc != 0:
                     _step1_done.set()
                     if not _cancelled.is_set():
                         _set_status(stage="error",
-                                    error=f"vendor pipeline failed ({fmt}): " + " | ".join(tail[-3:]))
+                                    error=f"vendor pipeline failed ({audio_file.name}): " + " | ".join(tail[-3:]))
                     return
 
             _step1_done.set()
             watcher.join(timeout=3.0)
 
-            # Step 2: copy only THIS run's MIDI files (progress 0.35 → 0.40)
+            # Step 2: collect MIDI for all audio files in the folder
+            # When reprocessing: only tracks touched this run (mtime check)
+            # When using existing: all tracks whose song IDs match files in the audio folder
             _set_status(message="step 2/3: export MIDI", progress=0.35)
             import shutil
+            skip_sids = {Path(fn).stem for fn in req.files_to_skip}
             new_midi_tracks = [
                 d for d in (midi_data.iterdir() if midi_data.exists() else [])
-                if d not in midi_tracks_before and d.is_dir()
+                if d.is_dir() and (d.stat().st_mtime >= _run_start or d.name in skip_sids)
             ]
             if not new_midi_tracks:
                 _set_status(stage="error", error="no new MIDI tracks produced — check audio files")
@@ -324,9 +383,10 @@ def process(req: ProcessRequest):
             # Step 3: preprocess → events (progress 0.40 → 1.0)
             _set_status(message="step 3/3: preprocessing", progress=0.40)
             pre_args = [
-                PYTHON, str(ROOT / "training" / "pre.py"),
+                PYTHON, "-m", "training.pre",
                 "--midi_folder", midi_dir,
                 "--data_folder", events_dir,
+                "--force",
             ]
             if req.tracks:
                 pre_args += ["--tracks", req.tracks]
@@ -337,7 +397,7 @@ def process(req: ProcessRequest):
                     _disc_path = ROOT / "runs" / "discriminator" / _disc_name
                     if _disc_path.exists():
                         # Map intensity [0,1] → threshold and bp_blend
-                        _threshold = 0.10 + req.disc_intensity * 0.45
+                        _threshold = 0.05 + req.disc_intensity * 0.50
                         _bp_blend  = 0.95 - req.disc_intensity * 0.15
                         pre_args += ["--discriminator",   str(_disc_path),
                                      "--disc_threshold",  str(round(_threshold, 4)),
@@ -373,8 +433,15 @@ def train(req: TrainRequest):
 
     def run():
         try:
-            events_dir = str((ROOT / req.events_dir).resolve())
-            ckpt_path  = str((ROOT / req.ckpt_path).resolve())
+            if req.project_name.strip():
+                project_slug = re.sub(r"[^\w-]", "_", req.project_name.strip()) or "default"
+                events_dir   = str(ROOT / "runs" / project_slug / "events")
+                ckpt_dir     = ROOT / "runs" / project_slug / "checkpoints"
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                ckpt_path    = str(ckpt_dir / "model.pt")
+            else:
+                events_dir = str((ROOT / req.events_dir).resolve())
+                ckpt_path  = str((ROOT / req.ckpt_path).resolve())
 
             _set_status(stage="training", message="training started",
                         error=None, epoch=0, total_epochs=req.epochs,
@@ -388,9 +455,11 @@ def train(req: TrainRequest):
                 "--vocab_json", str(Path(events_dir) / "event_vocab.json"),
                 "--save_path",  ckpt_path,
                 "--device",     req.device,
-                "--epochs",     str(req.epochs),
                 "--seq_len",    str(req.seq_len),
             ]
+            if req.pretrain_ckpt:
+                cmd += ["--resume", req.pretrain_ckpt]
+                print(f"[train] fine-tuning from: {req.pretrain_ckpt}", flush=True)
 
             rc, tail = _run_streaming(cmd, cwd=ROOT, parse_fn=_parse_train_line)
             if rc != 0:
@@ -398,7 +467,8 @@ def train(req: TrainRequest):
                     _set_status(stage="error", error="training failed: " + " | ".join(tail[-3:]))
                 return
 
-            _set_status(stage="done", message="training complete")
+            _set_status(stage="done", message="training complete",
+                        ckpt_path=ckpt_path)
         finally:
             _cancelled.clear()
             _job_lock.release()
@@ -412,8 +482,12 @@ def generate(req: GenerateRequest):
     if not _job_lock.acquire(blocking=False):
         raise HTTPException(409, "Another job is already running")
 
-    job_id  = str(uuid.uuid4())[:8]
-    out_dir = ROOT / "runs" / "generated" / "plugin" / job_id
+    job_id = str(uuid.uuid4())[:8]
+    if req.project_name.strip():
+        _proj_slug = re.sub(r"[^\w-]", "_", req.project_name.strip()) or "default"
+        out_dir = ROOT / "runs" / _proj_slug / "generated" / job_id
+    else:
+        out_dir = ROOT / "runs" / "generated" / "plugin" / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     def run():

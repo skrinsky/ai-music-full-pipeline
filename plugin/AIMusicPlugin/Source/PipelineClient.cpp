@@ -49,9 +49,10 @@ PipelineStatus PipelineClient::getStatus()
     auto json = juce::JSON::parse (resp);
     if (auto* obj = json.getDynamicObject())
     {
-        s.stage   = obj->getProperty ("stage").toString();
-        s.message = obj->getProperty ("message").toString();
-        s.error   = obj->getProperty ("error").toString();
+        s.stage    = obj->getProperty ("stage").toString();
+        s.message  = obj->getProperty ("message").toString();
+        s.error    = obj->getProperty ("error").toString();
+        s.ckptPath = obj->getProperty ("ckpt_path").toString();
         auto ep   = obj->getProperty ("epoch");
         auto vl   = obj->getProperty ("val_loss");
         auto te   = obj->getProperty ("total_epochs");
@@ -59,21 +60,45 @@ PipelineStatus PipelineClient::getStatus()
         if (! ep.isVoid())  s.epoch       = (int) ep;
         if (! vl.isVoid())  s.valLoss     = (double) vl;
         if (! te.isVoid())  s.totalEpochs = (int) te;
-        if (! pr.isVoid())  s.progress    = (float) (double) pr;
+        if (! pr.isVoid())  s.progress      = (float) (double) pr;
+        auto bp = obj->getProperty ("batch_progress");
+        if (! bp.isVoid())  s.batchProgress = (float) (double) bp;
     }
     return s;
 }
 
-bool PipelineClient::postProcess (const juce::String& audioFolder,
-                                  const juce::String& tracks,
-                                  bool normalizeKey,
-                                  float discIntensity)
+juce::StringArray PipelineClient::fetchExistingProcessed (const juce::String& audioFolder)
 {
+    auto encoded = juce::URL::addEscapeChars (audioFolder, true);
+    auto resp = get ("/check_existing?audio_folder=" + encoded);
+    juce::StringArray result;
+    if (resp.isEmpty()) return result;
+    auto json = juce::JSON::parse (resp);
+    if (auto* obj = json.getDynamicObject())
+        if (auto* arr = obj->getProperty ("existing").getArray())
+            for (auto& v : *arr)
+                result.add (v.toString());
+    return result;
+}
+
+bool PipelineClient::postProcess (const juce::String&      audioFolder,
+                                  const juce::String&      tracks,
+                                  bool                     normalizeKey,
+                                  float                    discIntensity,
+                                  const juce::String&      projectName,
+                                  const juce::StringArray& filesToSkip)
+{
+    juce::Array<juce::var> skipArr;
+    for (auto& f : filesToSkip)
+        skipArr.add (juce::var (f));
+
     auto* obj = new juce::DynamicObject();
     obj->setProperty ("audio_folder",   audioFolder);
     obj->setProperty ("tracks",         tracks);
     obj->setProperty ("normalize_key",  normalizeKey);
     obj->setProperty ("disc_intensity", (double) discIntensity);
+    obj->setProperty ("project_name",   projectName);
+    obj->setProperty ("files_to_skip",  juce::var (skipArr));
     auto resp = post ("/process", juce::JSON::toString (juce::var (obj)));
     return resp.contains ("started");
 }
@@ -82,14 +107,18 @@ bool PipelineClient::postTrain (const juce::String& eventsDir,
                                 const juce::String& ckptPath,
                                 const juce::String& device,
                                 int epochs,
-                                int seqLen)
+                                int seqLen,
+                                const juce::String& projectName,
+                                const juce::String& pretrainCkpt)
 {
     auto* obj = new juce::DynamicObject();
-    obj->setProperty ("events_dir", eventsDir);
-    obj->setProperty ("ckpt_path",  ckptPath);
-    obj->setProperty ("device",     device);
-    obj->setProperty ("epochs",     epochs);
-    obj->setProperty ("seq_len",    seqLen);
+    obj->setProperty ("events_dir",    eventsDir);
+    obj->setProperty ("ckpt_path",     ckptPath);
+    obj->setProperty ("device",        device);
+    obj->setProperty ("epochs",        epochs);
+    obj->setProperty ("seq_len",       seqLen);
+    obj->setProperty ("project_name",  projectName);
+    obj->setProperty ("pretrain_ckpt", pretrainCkpt);
     auto resp = post ("/train", juce::JSON::toString (juce::var (obj)));
     return resp.contains ("started");
 }
@@ -103,7 +132,8 @@ juce::String PipelineClient::postGenerate (const juce::String& ckpt,
                                            int   gridStraightStep,
                                            int   gridTripletStep,
                                            int   maxTokens,
-                                           bool  useSeed)
+                                           bool  useSeed,
+                                           const juce::String& projectName)
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty ("ckpt",               ckpt);
@@ -116,6 +146,7 @@ juce::String PipelineClient::postGenerate (const juce::String& ckpt,
     obj->setProperty ("grid_triplet_step",  gridTripletStep);
     obj->setProperty ("max_tokens",         maxTokens);
     obj->setProperty ("use_seed",           useSeed);
+    obj->setProperty ("project_name",       projectName);
     auto resp = post ("/generate", juce::JSON::toString (juce::var (obj)));
     if (resp.isEmpty()) return {};
     auto json = juce::JSON::parse (resp);
@@ -176,6 +207,14 @@ juce::String PipelineClient::fetchLatestEvents()
         if (! val.isVoid()) return val.toString();
     }
     return {};
+}
+
+juce::String PipelineClient::fetchDiscPreview (const juce::String& eventsDir)
+{
+    juce::String path = "/disc_preview";
+    if (eventsDir.isNotEmpty())
+        path += "?events_dir=" + juce::URL::addEscapeChars (eventsDir, true);
+    return get (path);
 }
 
 bool PipelineClient::fetchMidi (const juce::String& jobId, juce::MemoryBlock& midiData)

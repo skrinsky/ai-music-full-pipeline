@@ -32,10 +32,13 @@ public:
     bool isBusesLayoutSupported (const BusesLayout&) const override { return true; }
 
     // Pipeline control — called from editor
-    void startProcess (const juce::String& audioFolder);
+    void startProcess (const juce::String& audioFolder,
+                       const juce::StringArray& filesToSkip = {});
     void startTrain (const juce::String& eventsDir = {});
     void startGenerate();
     void cancelJob();
+
+    juce::StringArray fetchExistingProcessed() { return client.fetchExistingProcessed (audioFolder); }
 
     // State the editor reads
     PipelineStatus lastStatus;
@@ -58,13 +61,19 @@ public:
     // Advanced settings
     float  discIntensity  { 0.0f };  // 0 = off, 1 = max filtering
     int    seqLen         { 512 };   // training sequence length
+    juce::String pretrainCkpt {};    // if set, resume/fine-tune from this checkpoint
+
+    // Project / session name — organises all artifacts under runs/{projectName}/
+    juce::String projectName { "my_model" };
 
     double getHostBpm() const { return cachedBpm.load(); }
     int    loadCheckpointInfo();
     bool   isTrainingDataReady();
     juce::String getPref (const juce::String& key, const juce::String& fallback = {});
     void         setPref (const juce::String& key, const juce::String& value);
-    juce::String fetchLatestEvents() { return client.fetchLatestEvents(); }
+    juce::String fetchLatestEvents()  { return client.fetchLatestEvents(); }
+    juce::String fetchDiscPreview (const juce::String& eventsDir = {})
+                                   { return client.fetchDiscPreview (eventsDir); }
 
     // MIDI to send out on next processBlock call (filled from background thread)
     juce::MidiBuffer pendingMidi;

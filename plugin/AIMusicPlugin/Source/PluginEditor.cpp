@@ -5,18 +5,43 @@ static const juce::Colour kFg  { 0xffcdd6f4 };
 static const juce::Colour kAcc { 0xff89b4fa };
 
 // ── Mirror Mirror animation ───────────────────────────────────────────────────
-struct MirrorMirror : public juce::Component, private juce::Timer
+struct MirrorMirror : public juce::Component, public juce::TooltipClient, private juce::Timer
 {
     float phase          = 0.0f;
     bool  isError        = false;
     int   errorHoldFrames { 0 };   // counts down after error clears, giving a delay
-    float nodPhase       { -1.f }; // -1 = inactive; ≥0 = nod in progress
-    float shakePhase     { -1.f }; // -1 = inactive; ≥0 = head-shake (error)
-    float celebPhase     { -1.f }; // -1 = inactive; ≥0 = celebration burst + wink
+    float nodPhase       { -1.f }; // -1 = inactive; >=0 = nod in progress
+    float shakePhase     { -1.f }; // -1 = inactive; >=0 = head-shake (error)
+    float celebPhase     { -1.f }; // -1 = inactive; >=0 = celebration burst + wink
+    float boopPhase      { -1.f }; // -1 = inactive; >=0 = tickled shimmy
 
     void triggerNod()         { nodPhase   = 0.f; }
     void triggerShake()       { shakePhase = 0.f; }
     void triggerCelebration() { celebPhase = 0.f; }
+    void triggerBoop()        { boopPhase  = 0.f; }
+
+    juce::Point<float> noseCenter() const
+    {
+        float w  = (float) getWidth(), h = (float) getHeight();
+        float ow = 62.f, oh = h * 0.76f, oy = 12.f;
+        float ox = (w - ow) * 0.5f;
+        auto surf = juce::Rectangle<float> (ox + 8.f, oy + 8.f, ow - 16.f, oh - 16.f);
+        float sry = surf.getHeight() * 0.5f;
+        return { surf.getCentreX(), surf.getCentreY() + sry * 0.06f };
+    }
+
+    juce::String getTooltip() override
+    {
+        if (noseCenter().getDistanceFrom (getMouseXYRelative().toFloat()) < 9.f)
+            return "boop me!";
+        return {};
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (noseCenter().getDistanceFrom (e.position) < 9.f)
+            triggerBoop();
+    }
 
     MirrorMirror()  { startTimerHz (24); }
     ~MirrorMirror() override { stopTimer(); }
@@ -26,10 +51,10 @@ struct MirrorMirror : public juce::Component, private juce::Timer
         float w = (float) getWidth(), h = (float) getHeight();
         float cx = w * 0.5f;
 
-        // Mirror oval — right portion of component; left ~36px reserved for person
+        // Mirror oval -right portion of component; left ~36px reserved for person
         float ow = 62.f, oh = h * 0.76f;
         float oy = 12.f;
-        float ox = (w - ow) * 0.5f;  // centered — no person zone needed
+        float ox = (w - ow) * 0.5f;  // centered -no person zone needed
         auto oval = juce::Rectangle<float> (ox, oy, ow, oh);
         float rx = ow * 0.5f, ry = oh * 0.5f;
         float mcx = oval.getCentreX(), mcy = oval.getCentreY();
@@ -139,9 +164,25 @@ struct MirrorMirror : public juce::Component, private juce::Timer
         if (shakePhase >= 0.f)
             shakeX = srx * 0.28f * std::sin (shakePhase * 3.5f)
                                  * std::exp  (-shakePhase * 0.28f);
-        float fcx = scx + shakeX;  // face center x — shifts left-right on shake
+        // Boop: fast multi-axis jiggle at two incommensurate frequencies, decays quickly
+        float boopX = 0.f, boopY = 0.f;
+        if (boopPhase >= 0.f)
+        {
+            float env = std::exp (-boopPhase * 1.4f);
+            boopX = srx * 0.10f * std::sin (boopPhase * 13.1f) * env;
+            boopY = sry * 0.08f * std::sin (boopPhase * 17.7f) * env;
+        }
+        float fcx = scx + shakeX + boopX;  // face center x
 
-        float ey  = scy - sry * 0.14f + nodY;
+        // Tickle shimmer flash
+        if (boopPhase >= 0.f)
+        {
+            float bf = std::exp (-boopPhase * 2.5f);
+            g.setColour (juce::Colour (0xffFF99CC).withAlpha (bf * 0.28f));
+            g.fillEllipse (surf_rect);
+        }
+
+        float ey  = scy - sry * 0.14f + nodY + boopY;
         float ex  = srx * 0.30f;
 
         // Wink: right eye closes on celebration (sin peaks ~0.4s, opens ~0.8s)
@@ -200,7 +241,7 @@ struct MirrorMirror : public juce::Component, private juce::Timer
             g.strokePath (lid, juce::PathStrokeType (1.3f));
         }
 
-        float fmy = scy + sry * 0.24f + nodY;
+        float fmy = scy + sry * 0.24f + nodY + boopY;
         if (isError || errorHoldFrames > 0)
         {
             // errScale fades the O out after error clears (1.0 while error active)
@@ -215,7 +256,7 @@ struct MirrorMirror : public juce::Component, private juce::Timer
                 g.setColour (juce::Colour (0xff010408).withAlpha (vis * errScale));
                 g.fillEllipse (fcx - omw, fmy - omh * 0.5f, omw * 2.f, omh * 2.f);
 
-                // ── violet swirl — pulses at a different rate ──────────────
+                // ── violet swirl -pulses at a different rate ──────────────
                 float swirl = 0.45f + 0.40f * std::sin (phase * 3.1f);
                 g.setColour (juce::Colour (0xff9922ee).withAlpha (vis * swirl * 0.55f * mouthOpen * errScale));
                 g.fillEllipse (fcx - omw * 0.58f, fmy - omh * 0.40f,
@@ -233,7 +274,7 @@ struct MirrorMirror : public juce::Component, private juce::Timer
             }
             else
             {
-                // Almost-closed — thin line so it doesn't snap to smile
+                // Almost-closed -thin line so it doesn't snap to smile
                 g.setColour (juce::Colour (0xff88bbff).withAlpha (vis * 0.30f * errScale));
                 g.drawLine (fcx - omw * 0.5f, fmy, fcx + omw * 0.5f, fmy, 1.0f);
             }
@@ -342,6 +383,11 @@ struct MirrorMirror : public juce::Component, private juce::Timer
             celebPhase += 0.065f;
             if (celebPhase > 5.0f) celebPhase = -1.f;
         }
+        if (boopPhase >= 0.f)
+        {
+            boopPhase += 0.075f;
+            if (boopPhase > 4.0f) boopPhase = -1.f;
+        }
         // Drive all animated painting in the parent editor (title sparkles + button pulses)
         if (auto* parent = getParentComponent())
             parent->repaint();
@@ -349,7 +395,7 @@ struct MirrorMirror : public juce::Component, private juce::Timer
     }
 };
 
-// ── Eye knob — used for the lone Seq Len knob on the Process & Train tab ─────
+// ── Eye knob -used for the lone Seq Len knob on the Process & Train tab ─────
 struct MirrorEyeKnobLAF : public juce::LookAndFeel_V4
 {
     void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
@@ -367,7 +413,7 @@ struct MirrorEyeKnobLAF : public juce::LookAndFeel_V4
         g.setColour (juce::Colour (0xff6633cc).withAlpha (0.22f));
         g.fillEllipse (cx - r - 4.f, cy - r - 4.f, (r + 4.f) * 2.f, (r + 4.f) * 2.f);
 
-        // Same gold frame gradient — visual family connection
+        // Same gold frame gradient -visual family connection
         juce::ColourGradient frameGrad (
             juce::Colour (0xffFFE566), cx, cy - r,
             juce::Colour (0xff7A4E00), cx, cy + r, false);
@@ -384,7 +430,7 @@ struct MirrorEyeKnobLAF : public juce::LookAndFeel_V4
         g.setGradientFill (irisBase);
         g.fillEllipse (cx - sr, cy - sr, sr * 2.f, sr * 2.f);
 
-        // Radial striations — thin rays from pupil edge outward
+        // Radial striations -thin rays from pupil edge outward
         int nRays = 36;
         for (int i = 0; i < nRays; ++i)
         {
@@ -399,7 +445,7 @@ struct MirrorEyeKnobLAF : public juce::LookAndFeel_V4
                         cx + std::cos (a) * outer, cy + std::sin (a) * outer, thick);
         }
 
-        // Collarette ring (just outside pupil — like real iris anatomy)
+        // Collarette ring (just outside pupil -like real iris anatomy)
         float colR = sr * 0.36f;
         g.setColour (juce::Colour (0xffCE9E22).withAlpha (0.25f));
         g.drawEllipse (cx - colR, cy - colR, colR * 2.f, colR * 2.f, 1.0f);
@@ -419,7 +465,7 @@ struct MirrorEyeKnobLAF : public juce::LookAndFeel_V4
         g.setColour (juce::Colour (0xff99bbff).withAlpha (0.40f));
         g.fillEllipse (cx - pr * 0.38f, cy - pr * 0.38f, pr * 0.75f, pr * 0.75f);
 
-        // ── Value pointer — gold spoke from pupil edge to iris ────────────────
+        // ── Value pointer -gold spoke from pupil edge to iris ────────────────
         float curAngle = startAngle + (endAngle - startAngle) * sliderPos;
         float si = pr * 1.05f,  so = sr * 0.87f;
         float sx1 = cx + std::sin (curAngle) * si,  sy1 = cy - std::cos (curAngle) * si;
@@ -457,7 +503,7 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
         float r  = std::min (width, height) * 0.5f - 3.f;
         if (r < 5.f) return;
 
-        // outer purple glow — very subtle slow pulse
+        // outer purple glow -very subtle slow pulse
         {
             float t    = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
             float glow = 0.19f + 0.03f * std::sin (t * 0.32f + sliderPos * 5.1f);
@@ -483,7 +529,7 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
         g.setGradientFill (surf);
         g.fillEllipse (cx - sr, cy - sr, sr * 2.f, sr * 2.f);
 
-        // shimmer highlight — very slowly breathes and drifts
+        // shimmer highlight -very slowly breathes and drifts
         {
             float t  = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
             float s1 = std::sin (t * 0.31f);          // primary breath
@@ -532,7 +578,7 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
                                                         juce::PathStrokeType::rounded));
         }
 
-        // value arc — glow
+        // value arc -glow
         float curAngle = startAngle + (endAngle - startAngle) * sliderPos;
         if (sliderPos > 0.001f)
         {
@@ -560,7 +606,7 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
         g.setColour (juce::Colours::white.withAlpha (0.90f));
         g.fillEllipse (dotX - 1.4f, dotY - 1.4f, 2.8f, 2.8f);
 
-        // Dancing reflection twinkle — sliderPos is naturally different per knob
+        // Dancing reflection twinkle -sliderPos is naturally different per knob
         // (temp ~0.34, topP ~0.94, length ~0.23, tempo ~0.4) so it seeds unique timing.
         {
             float t  = (float) (juce::Time::getMillisecondCounterHiRes() * 0.001);
@@ -576,7 +622,7 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
                 float wx = cx - sr * 0.15f + sr * 0.10f * std::sin (t * 0.31f + ph);
                 float wy = cy - sr * 0.55f + sr * 0.07f * std::sin (t * 0.21f + ph + 1.2f);
 
-                // Pale blue-lavender — same family as the knob's existing shimmer
+                // Pale blue-lavender -same family as the knob's existing shimmer
                 auto col = juce::Colour (0xffcce6ff);
 
                 g.setColour (col.withAlpha (tw * 0.10f));
@@ -591,10 +637,10 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
             }
         }
 
-        // Frozen-state overlay — rendered on top of the knob when disabled
+        // Frozen-state overlay -rendered on top of the knob when disabled
         if (! slider.isEnabled())
         {
-            // Dim veil — bg colour at ~66% alpha kills the glow and colour
+            // Dim veil -bg colour at ~66% alpha kills the glow and colour
             g.setColour (juce::Colour (0xa81e1e2e));
             g.fillEllipse (cx - r - 4.f, cy - r - 4.f, (r + 4.f) * 2.f, (r + 4.f) * 2.f);
             // Ice-blue rim signals "frozen", not just "turned off"
@@ -604,7 +650,7 @@ struct MirrorKnobLAF : public juce::LookAndFeel_V4
     }
 };
 
-// ── Magical toggle buttons — glowing orb instead of a tick box ───────────────
+// ── Magical toggle buttons -glowing orb instead of a tick box ───────────────
 struct SmallToggleLAF : public juce::LookAndFeel_V4
 {
     void drawTickBox (juce::Graphics& g, juce::Component& /*component*/,
@@ -615,7 +661,7 @@ struct SmallToggleLAF : public juce::LookAndFeel_V4
         float cx = x + w * 0.5f, cy = y + h * 0.5f;
         float r  = std::min (w, h) * 0.5f - 0.5f;
 
-        // Outer ring — dim gold, brightens when checked
+        // Outer ring -dim gold, brightens when checked
         g.setColour (juce::Colour (ticked ? 0xffFFD700u : 0xffCE9E22u)
                          .withAlpha (isEnabled ? (ticked ? 0.80f : 0.42f) : 0.20f));
         g.drawEllipse (cx - r, cy - r, r * 2.f, r * 2.f, 1.1f);
@@ -656,7 +702,7 @@ struct SmallToggleLAF : public juce::LookAndFeel_V4
     }
 };
 
-// ── Magical UI LookAndFeel — buttons, combo boxes, popup menus ────────────────
+// ── Magical UI LookAndFeel -buttons, combo boxes, popup menus ────────────────
 struct MirrorUILAF : public juce::LookAndFeel_V4
 {
     MirrorUILAF()
@@ -684,7 +730,7 @@ struct MirrorUILAF : public juce::LookAndFeel_V4
         g.setGradientFill (base);
         g.fillRoundedRectangle (b, corner);
 
-        // Low-alpha tint = accent overlay (e.g., active tab — set via setColour)
+        // Low-alpha tint = accent overlay (e.g., active tab -set via setColour)
         if (bgColour.getAlpha() < 200)
         {
             g.setColour (bgColour);
@@ -698,7 +744,7 @@ struct MirrorUILAF : public juce::LookAndFeel_V4
             g.fillRoundedRectangle (b, corner);
         }
 
-        // Gold border — dims when idle, brightens on hover
+        // Gold border -dims when idle, brightens on hover
         float ba = down ? 1.0f : (highlighted ? 0.80f : 0.40f);
         juce::ColourGradient border (
             juce::Colour (0xffFFE566).withAlpha (ba), b.getCentreX(), b.getY(),
@@ -809,97 +855,635 @@ struct MirrorUILAF : public juce::LookAndFeel_V4
     juce::Font getPopupMenuFont() override { return juce::Font (12.f); }
 };
 
-// ── Key button LookAndFeel — paints an ornate gold key with purple gem ────────
-struct KeyButtonLAF : public juce::LookAndFeel_V4
+// ── Key button LookAndFeel -horizontal key, gold on purple glow ─────────────
+struct VanityButtonLAF : public juce::LookAndFeel_V4
 {
+    float phase { 0.0f };
+
     void drawButtonBackground (juce::Graphics& g, juce::Button& btn,
                                const juce::Colour&, bool isOver, bool isDown) override
     {
         float w = (float) btn.getWidth(), h = (float) btn.getHeight();
-        float cy = h * 0.5f;
 
-        // Purple magic glow
-        float ga = isDown ? 0.65f : (isOver ? 0.42f : 0.20f);
-        g.setColour (juce::Colour (0xff6633cc).withAlpha (ga));
-        g.fillEllipse (2.f, 2.f, w - 4.f, h - 4.f);
+        // ── purple glow ───────────────────────────────────────────────────────
+        float ga = isDown ? 0.70f : (isOver ? 0.48f : 0.24f);
+        g.setColour (juce::Colour (0xff5522bb).withAlpha (ga));
+        g.fillEllipse (1.f, 1.f, w - 2.f, h - 2.f);
 
-        // ── key geometry ──────────────────────────────────────────────────────
-        // Bow: anchor from left with padding so it never clips
-        float bowR  = h * 0.28f;                  // outer radius (~7px on 26px btn)
-        float bowCx = bowR + 3.0f;                // always safe from left edge
-        float bowCy = cy;
-        float holeR = bowR * 0.48f;
+        // ── shared gold gradient ──────────────────────────────────────────────
+        float cx = w * 0.5f, cy = h * 0.5f;
+        juce::ColourGradient gold (
+            juce::Colour (0xff9A6B00), cx, h * 0.10f,
+            juce::Colour (0xffFFE566), cx, h * 0.90f, false);
+        gold.addColour (0.30, juce::Colour (0xffFFD700));
+        gold.addColour (0.65, juce::Colour (0xffDDA020));
+        juce::Colour outline { juce::Colour (0xff6B4800).withAlpha (0.55f) };
 
-        // Shaft: runs from bow to right, vertically centered, thin
-        float sY1  = cy - h * 0.09f;              // shaft top
-        float sY2  = cy + h * 0.09f;              // shaft bottom
-        float sX0  = bowCx + bowR * 0.55f;        // emerges from inside bow ring
-        float sX1  = w - 1.5f;                    // right end
+        // ══ HAIRBRUSH (left portion, rotated 30°) ════════════════════════════
+        float bCx = w * 0.27f, bCy = cy;
+        float ang = juce::MathConstants<float>::pi * 0.167f;   // 30°
+        auto  rot = juce::AffineTransform::rotation (ang, bCx, bCy);
 
-        // Teeth: three rectangular notches projecting down from shaft bottom
-        // spaced evenly along the back half of the shaft
-        float shaftLen = sX1 - sX0;
-        float tw   = shaftLen * 0.155f;           // tooth width
-        float gap  = shaftLen * 0.10f;
-        float tX0  = sX0 + gap;
-        float tX1  = tX0 + tw + gap * 1.1f;
-        float tX2  = tX1 + tw + gap * 1.1f;
+        float headCy  = bCy - h * 0.110f;
+        float headRx  = w * 0.192f;
+        float headRy  = h * 0.246f;
+        float padRx   = headRx * 0.68f;
+        float padRy   = headRy * 0.68f;
+        float handleHW = w * 0.052f;
+        float handleT  = headCy + headRy * 0.62f;
+        float handleB  = bCy + h * 0.380f;
 
-        // Gold gradient (top-to-bottom, matches mirror frame)
-        auto makeGold = [&]() {
-            juce::ColourGradient gr (juce::Colour (0xffFFE566), bowCx, bowCy - bowR,
-                                     juce::Colour (0xff9A6B00), bowCx, bowCy + bowR * 1.7f, false);
-            gr.addColour (0.28, juce::Colour (0xffFFD700));
-            gr.addColour (0.65, juce::Colour (0xffCE9E22));
-            return gr;
-        };
+        juce::Path handle;
+        handle.addRoundedRectangle (bCx - handleHW, handleT,
+                                    handleHW * 2.f, handleB - handleT,
+                                    handleHW * 0.75f);
+        handle.applyTransform (rot);
+        g.setGradientFill (gold);
+        g.fillPath (handle);
 
-        // ── filled bow ring ───────────────────────────────────────────────────
-        g.setGradientFill (makeGold());
-        g.fillEllipse (bowCx - bowR, bowCy - bowR, bowR * 2.f, bowR * 2.f);
+        juce::Path outer;
+        outer.addEllipse (bCx - headRx, headCy - headRy,
+                          headRx * 2.f, headRy * 2.f);
+        outer.applyTransform (rot);
+        g.setGradientFill (gold);
+        g.fillPath (outer);
 
-        // punch hole (background colour)
-        g.setColour (juce::Colour (0xff1e1e2e));
-        g.fillEllipse (bowCx - holeR, bowCy - holeR, holeR * 2.f, holeR * 2.f);
+        juce::Path pad;
+        pad.addEllipse (bCx - padRx, headCy - padRy,
+                        padRx * 2.f, padRy * 2.f);
+        pad.applyTransform (rot);
+        g.setColour (juce::Colour (0xff0d0820));
+        g.fillPath (pad);
 
-        // gem inside hole
-        float gemR = holeR * 0.60f;
-        g.setColour (juce::Colour (0xff8833bb));
-        g.fillEllipse (bowCx - gemR, bowCy - gemR, gemR * 2.f, gemR * 2.f);
-        g.setColour (juce::Colour (0xffcc88ff).withAlpha (0.72f));
-        g.fillEllipse (bowCx - gemR * 0.48f, bowCy - gemR * 0.70f, gemR * 0.48f, gemR * 0.44f);
+        float bLen = h * 0.068f;
+        g.setColour (juce::Colour (0xffFFD700).withAlpha (0.90f));
+        for (int i = 0; i < 12; ++i)
+        {
+            float a   = i * juce::MathConstants<float>::twoPi / 12.f;
+            float bx0 = bCx    + std::cos (a) * padRx;
+            float by0 = headCy + std::sin (a) * padRy;
+            float bx1 = bCx    + std::cos (a) * (padRx - bLen);
+            float by1 = headCy + std::sin (a) * (padRy - bLen);
+            juce::Path bl;
+            bl.startNewSubPath (bx0, by0);
+            bl.lineTo          (bx1, by1);
+            bl.applyTransform  (rot);
+            g.strokePath (bl, juce::PathStrokeType (0.60f));
+        }
 
-        // ── shaft ─────────────────────────────────────────────────────────────
-        g.setGradientFill (makeGold());
-        g.fillRect (juce::Rectangle<float> (sX0, sY1, sX1 - sX0, sY2 - sY1));
+        g.setColour (outline);
+        g.strokePath (handle, juce::PathStrokeType (0.70f));
+        g.strokePath (outer,  juce::PathStrokeType (0.80f));
+        juce::Path padOut;
+        padOut.addEllipse (bCx - padRx, headCy - padRy, padRx * 2.f, padRy * 2.f);
+        padOut.applyTransform (rot);
+        g.setColour (outline.withAlpha (0.30f));
+        g.strokePath (padOut, juce::PathStrokeType (0.50f));
 
-        // ── three teeth projecting down from shaft ────────────────────────────
-        g.fillRect (juce::Rectangle<float> (tX0, sY2, tw, h * 0.24f));
-        g.fillRect (juce::Rectangle<float> (tX1, sY2, tw, h * 0.17f));
-        g.fillRect (juce::Rectangle<float> (tX2, sY2, tw, h * 0.21f));
+        float gleam = 0.38f + 0.22f * std::sin (phase * 1.5f);
+        juce::Path arc;
+        arc.addArc (bCx - headRx * 0.76f, headCy - headRy * 0.76f,
+                    headRx * 1.52f,        headRy * 1.52f,
+                    -juce::MathConstants<float>::pi * 0.85f,
+                    -juce::MathConstants<float>::pi * 0.10f, true);
+        arc.applyTransform (rot);
+        g.setColour (juce::Colours::white.withAlpha (gleam));
+        g.strokePath (arc, juce::PathStrokeType (1.0f));
 
-        // ── top highlight edge on shaft ───────────────────────────────────────
-        g.setColour (juce::Colour (0xffFFE566).withAlpha (0.50f));
-        g.drawLine (sX0, sY1, sX1, sY1, 1.0f);
+        // ══ COMB (right portion, -15° tilt) ══════════════════════════════════
+        // Spine (backbone) on the right, prong teeth extending left,
+        // handle tapering below with a rounded end -like the reference.
+        float cCx  = w * 0.810f, cCy = cy;
+        float cAng = -juce::MathConstants<float>::pi / 12.f;   // -15°
+        // Flip horizontally around cCx so teeth point right (away from brush), then rotate
+        auto  cRot = juce::AffineTransform::scale (-1.f, 1.f, cCx, cCy)
+                         .followedBy (juce::AffineTransform::rotation (cAng, cCx, cCy));
+
+        float spineW  = w * 0.110f;                            // backbone width
+        float toothL  = w * 0.094f;                            // prong length (extends left)
+        float toothH  = h * 0.037f;                            // prong height
+        float gapH    = h * 0.022f;                            // gap between prongs
+        int   nTeeth  = 8;
+        float headH   = nTeeth * toothH + (nTeeth + 1) * gapH; // head section total height
+        float handleH = h * 0.175f;                            // handle length
+        float handleW = spineW * 0.65f;                        // handle narrower than spine
+
+        float headTop = cCy - (headH + handleH) * 0.5f;
+        float headBot = headTop + headH;
+        float handleBot = headBot + handleH;
+
+        // Handle: tapers from spine width down to handleW, rounded tip
+        juce::Path hndl;
+        hndl.startNewSubPath (cCx - spineW * 0.5f, headBot);
+        hndl.lineTo          (cCx + spineW * 0.5f, headBot);
+        hndl.quadraticTo     (cCx + spineW * 0.5f,  headBot + handleH * 0.32f,
+                              cCx + handleW * 0.5f,  headBot + handleH * 0.38f);
+        hndl.lineTo          (cCx + handleW * 0.5f,  handleBot - handleW * 0.5f);
+        hndl.quadraticTo     (cCx + handleW * 0.5f,  handleBot,
+                              cCx,                   handleBot);
+        hndl.quadraticTo     (cCx - handleW * 0.5f,  handleBot,
+                              cCx - handleW * 0.5f,  handleBot - handleW * 0.5f);
+        hndl.lineTo          (cCx - handleW * 0.5f,  headBot + handleH * 0.38f);
+        hndl.quadraticTo     (cCx - spineW * 0.5f,   headBot + handleH * 0.32f,
+                              cCx - spineW * 0.5f,   headBot);
+        hndl.closeSubPath();
+        hndl.applyTransform (cRot);
+        g.setGradientFill (gold);
+        g.fillPath (hndl);
+        g.setColour (outline);
+        g.strokePath (hndl, juce::PathStrokeType (0.70f));
+
+        // Spine (backbone of head section)
+        juce::Path spn;
+        spn.addRoundedRectangle (cCx - spineW * 0.5f, headTop,
+                                 spineW, headH, spineW * 0.38f);
+        spn.applyTransform (cRot);
+        g.setGradientFill (gold);
+        g.fillPath (spn);
+
+        // Prong teeth -solid filled rectangles with gaps between them
+        float ty = headTop + gapH;
+        for (int i = 0; i < nTeeth; ++i, ty += toothH + gapH)
+        {
+            juce::Path tooth;
+            tooth.addRoundedRectangle (cCx - spineW * 0.5f - toothL,
+                                       ty, toothL, toothH,
+                                       toothH * 0.45f);
+            tooth.applyTransform (cRot);
+            g.setGradientFill (gold);
+            g.fillPath (tooth);
+            g.setColour (outline.withAlpha (0.38f));
+            g.strokePath (tooth, juce::PathStrokeType (0.48f));
+        }
+
+        // Spine outline drawn last so it sits cleanly over tooth roots
+        g.setColour (outline);
+        g.strokePath (spn, juce::PathStrokeType (0.75f));
+
     }
 
     void drawButtonText (juce::Graphics&, juce::TextButton&, bool, bool) override {}
 };
+
+
+
+// ── Advanced Settings Panel ───────────────────────────────────────────────────
+// ── Piano roll component ──────────────────────────────────────────────────────
+struct PianoRollView : public juce::Component
+{
+    struct Note { float t, dur; int pitch, vel, inst; float score; };
+    const std::vector<Note>* notes { nullptr };
+    float threshold { 0.35f };
+
+    static const juce::Colour kInstCols[6];
+
+    void setData (const std::vector<Note>* n, float th)
+    {
+        notes = n;  threshold = th;  repaint();
+    }
+    void setThreshold (float th) { threshold = th;  repaint(); }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour (0xff080614));
+
+        if (! notes || notes->empty())
+        {
+            g.setColour (juce::Colour (0xff4a4a6a));
+            g.setFont (11.f);
+            g.drawText ("no preview data", getLocalBounds(), juce::Justification::centred);
+            return;
+        }
+
+        float tMin = 1e9f, tMax = -1e9f;
+        int   pMin = 127,  pMax = 0;
+        for (auto& n : *notes)
+        {
+            tMin = std::min (tMin, n.t);
+            tMax = std::max (tMax, n.t + n.dur);
+            pMin = std::min (pMin, n.pitch);
+            pMax = std::max (pMax, n.pitch);
+        }
+        pMin = std::max (0,   pMin - 2);
+        pMax = std::min (127, pMax + 2);
+        int   pRange = std::max (1, pMax - pMin);
+        float tRange = std::max (0.001f, tMax - tMin);
+        float w = (float) getWidth(), h = (float) getHeight();
+        float rowH = h / (float) pRange;
+
+        // faint horizontal grid lines every 12 semitones (one octave)
+        g.setColour (juce::Colour (0xffffffff).withAlpha (0.04f));
+        for (int p = pMin; p <= pMax; p += 12)
+        {
+            float y = h - ((float)(p - pMin) + 0.5f) / (float) pRange * h;
+            g.drawHorizontalLine ((int) y, 0.f, w);
+        }
+
+        for (auto& n : *notes)
+        {
+            float nx = (n.t - tMin) / tRange * w;
+            float nw = std::max (1.5f, n.dur / tRange * w);
+            float ny = h - ((float)(n.pitch - pMin) + 1.f) / (float) pRange * h;
+            float nh = std::max (1.5f, rowH * 0.82f);
+
+            bool kept = n.score >= threshold;
+            int  ci   = std::clamp (n.inst, 0, 5);
+
+            if (kept)
+            {
+                float lift = 0.55f + 0.45f * juce::jmin (1.f,
+                    (n.score - threshold) / (1.f - threshold + 0.001f));
+                g.setColour (kInstCols[ci].withAlpha (lift));
+                g.fillRect  (nx, ny, nw, nh);
+                // tiny bright top edge
+                g.setColour (juce::Colours::white.withAlpha (lift * 0.4f));
+                g.fillRect  (nx, ny, nw, 1.f);
+            }
+            else
+            {
+                float dim = 0.10f + 0.12f * (n.score / std::max (0.001f, threshold));
+                g.setColour (juce::Colour (0xff4b2a6b).withAlpha (dim));
+                g.fillRect  (nx, ny, nw, nh);
+            }
+        }
+
+        // threshold label
+        juce::String thr = juce::String ((int) std::round (threshold * 100)) + "% threshold";
+        g.setColour  (juce::Colour (0xffFFD700).withAlpha (0.55f));
+        g.setFont    (9.5f);
+        g.drawText   (thr, 4, 3, 120, 13, juce::Justification::left);
+    }
+};
+
+const juce::Colour PianoRollView::kInstCols[6] = {
+    juce::Colour (0xffcc88ff),   // 0 vox lead -purple
+    juce::Colour (0xffaa66dd),   // 1 vox harm -soft purple
+    juce::Colour (0xff88dd44),   // 2 guitar -green-gold
+    juce::Colour (0xff44aaff),   // 3 other -blue
+    juce::Colour (0xffFFAA22),   // 4 bass -warm gold
+    juce::Colour (0xff888899),   // 5 drums -gray
+};
+
+// ── Reprocess Dialog ──────────────────────────────────────────────────────────
+struct ReprocessDialog : public juce::Component
+{
+    juce::StringArray              files;
+    juce::Array<bool>              reprocessFlags;
+    std::function<void(juce::StringArray)> onConfirm;
+    std::function<void()>          onCancel;
+
+    int  hoverRow     { -1 };
+    bool hoverConfirm { false }, hoverCancel { false };
+    bool hoverUp      { false }, hoverDown   { false };
+    int  scrollOffset { 0 };
+    int  dragStartY   { -1 };
+    int  dragStartOff { 0 };
+    bool wasDrag      { false };
+
+    explicit ReprocessDialog (const juce::StringArray& f) : files (f)
+    {
+        for (int i = 0; i < f.size(); ++i)
+            reprocessFlags.add (false);
+        setInterceptsMouseClicks (true, false);
+    }
+
+    int maxVisibleRows() const
+    {
+        int maxRows = (getHeight() - 40 - 78 - 54) / 32;
+        return juce::jmax (2, juce::jmin ((int) files.size(), maxRows));
+    }
+    bool needsScroll() const { return (int) files.size() > maxVisibleRows(); }
+    int  maxScroll()   const { return juce::jmax (0, (int) files.size() - maxVisibleRows()); }
+
+    juce::Rectangle<int> panelBounds() const
+    {
+        int pw = 420, ph = 78 + maxVisibleRows() * 32 + 54;
+        return { (getWidth() - pw) / 2, (getHeight() - ph) / 2, pw, ph };
+    }
+    // List rows live between y=70 and y=70+visible*32 inside the panel
+    juce::Rectangle<int> listArea() const
+    {
+        auto p = panelBounds();
+        return { p.getX(), p.getY() + 70, p.getWidth(), maxVisibleRows() * 32 };
+    }
+    juce::Rectangle<int> toggleBounds (int i) const
+    {
+        auto p = panelBounds();
+        return { p.getRight() - 118, p.getY() + 74 + (i - scrollOffset) * 32, 104, 24 };
+    }
+    juce::Rectangle<int> upArrowBounds() const
+    {
+        auto p = panelBounds();
+        return { p.getRight() - 22, p.getY() + 70, 16, 16 };
+    }
+    juce::Rectangle<int> downArrowBounds() const
+    {
+        auto p  = panelBounds();
+        int  la = maxVisibleRows() * 32;
+        return { p.getRight() - 22, p.getY() + 70 + la - 16, 16, 16 };
+    }
+    juce::Rectangle<int> confirmBounds() const
+    {
+        auto p = panelBounds();
+        return { p.getRight() - 112, p.getBottom() - 44, 96, 30 };
+    }
+    juce::Rectangle<int> cancelBounds() const
+    {
+        auto p = panelBounds();
+        return { p.getX() + 16, p.getBottom() - 44, 96, 30 };
+    }
+
+    void scroll (int delta)
+    {
+        scrollOffset = juce::jlimit (0, maxScroll(), scrollOffset + delta);
+        hoverRow = -1;
+        repaint();
+    }
+
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+    {
+        if (needsScroll())
+            scroll (wheel.deltaY < 0 ? 1 : -1);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour (0xcc060412));
+
+        auto panel = panelBounds().toFloat();
+        g.setColour (juce::Colour (0xff130a24));
+        g.fillRoundedRectangle (panel, 12.f);
+        g.setColour (juce::Colour (0xff5522bb).withAlpha (0.75f));
+        g.drawRoundedRectangle (panel, 12.f, 1.5f);
+
+        // Title
+        g.setColour (juce::Colour (0xffFFD700));
+        g.setFont (juce::Font (14.f, juce::Font::bold));
+        g.drawText ("ALREADY PROCESSED", panelBounds().withHeight (44),
+                    juce::Justification::centred);
+
+        // Subtitle
+        g.setColour (juce::Colours::white.withAlpha (0.45f));
+        g.setFont (juce::Font (10.5f));
+        g.drawText ("Gold = will be reprocessed   |   Dark = use existing",
+                    panelBounds().withTrimmedTop (40).withHeight (24),
+                    juce::Justification::centred);
+
+        // Divider
+        g.setColour (juce::Colour (0xff5522bb).withAlpha (0.28f));
+        g.drawLine ((float) panelBounds().getX() + 18, (float) panelBounds().getY() + 68,
+                    (float) panelBounds().getRight() - 18, (float) panelBounds().getY() + 68, 1.f);
+
+        // Rows
+        int visible = maxVisibleRows();
+        int end     = juce::jmin ((int) files.size(), scrollOffset + visible);
+        for (int i = scrollOffset; i < end; ++i)
+        {
+            bool rep  = reprocessFlags[i];
+            int  visI = i - scrollOffset;
+
+            if (hoverRow == i)
+            {
+                g.setColour (juce::Colour (0xff1e1040));
+                g.fillRoundedRectangle ((float) panelBounds().getX() + 10,
+                                        (float) panelBounds().getY() + 70 + visI * 32,
+                                        (float) panelBounds().getWidth() - 20, 28.f, 5.f);
+            }
+
+            g.setColour (juce::Colours::white.withAlpha (rep ? 1.0f : 0.72f));
+            g.setFont (juce::Font (10.5f));
+            g.drawText (files[i],
+                        panelBounds().getX() + 18,
+                        panelBounds().getY() + 74 + visI * 32,
+                        panelBounds().getWidth() - 142, 22,
+                        juce::Justification::centredLeft, true);
+
+            auto tb = toggleBounds (i).toFloat();
+            g.setColour (rep ? juce::Colour (0xffFFD700) : juce::Colour (0xff1a1040));
+            g.fillRoundedRectangle (tb, 5.f);
+            g.setColour (rep ? juce::Colour (0xffAA8800).withAlpha (0.7f)
+                             : juce::Colour (0xff5522bb).withAlpha (0.45f));
+            g.drawRoundedRectangle (tb, 5.f, 1.f);
+            g.setColour (rep ? juce::Colour (0xff0d0820) : juce::Colours::white.withAlpha (0.50f));
+            g.setFont (juce::Font (9.f, juce::Font::bold));
+            g.drawText (rep ? "REPROCESS" : "USE EXISTING",
+                        toggleBounds (i), juce::Justification::centred);
+        }
+
+        // Up / down arrows + scrollbar (shown when list overflows)
+        if (needsScroll())
+        {
+            // Scrollbar track
+            auto  p   = panelBounds();
+            int   sbX = p.getRight() - 10;
+            int   sbY = p.getY() + 70;
+            int   sbH = visible * 32;
+            float ratio = (float) visible / (float) files.size();
+            float posF  = maxScroll() > 0 ? (float) scrollOffset / (float) maxScroll() : 0.f;
+            int   tH    = juce::jmax (16, (int) (sbH * ratio));
+            int   tY    = sbY + (int) ((sbH - tH) * posF);
+
+            g.setColour (juce::Colour (0xff5522bb).withAlpha (0.18f));
+            g.fillRoundedRectangle ((float) sbX, (float) sbY, 4.f, (float) sbH, 2.f);
+            g.setColour (juce::Colour (0xff5522bb).withAlpha (0.65f));
+            g.fillRoundedRectangle ((float) sbX, (float) tY, 4.f, (float) tH, 2.f);
+
+            // Up arrow
+            auto drawArrow = [&] (juce::Rectangle<int> r, bool pointUp, bool hover, bool enabled)
+            {
+                float alpha = enabled ? (hover ? 0.95f : 0.55f) : 0.18f;
+                g.setColour (juce::Colour (0xff5522bb).withAlpha (alpha * 0.5f));
+                g.fillRoundedRectangle (r.toFloat(), 3.f);
+                g.setColour (juce::Colour (0xffFFD700).withAlpha (alpha));
+                juce::Path tri;
+                float cx = r.getCentreX(), cy = r.getCentreY();
+                float hw = 4.f, hh = 3.f;
+                if (pointUp)
+                {
+                    tri.startNewSubPath (cx, cy - hh);
+                    tri.lineTo (cx - hw, cy + hh);
+                    tri.lineTo (cx + hw, cy + hh);
+                }
+                else
+                {
+                    tri.startNewSubPath (cx, cy + hh);
+                    tri.lineTo (cx - hw, cy - hh);
+                    tri.lineTo (cx + hw, cy - hh);
+                }
+                tri.closeSubPath();
+                g.fillPath (tri);
+            };
+            drawArrow (upArrowBounds(),   true,  hoverUp,   scrollOffset > 0);
+            drawArrow (downArrowBounds(), false, hoverDown, scrollOffset < maxScroll());
+        }
+
+        // Cancel button
+        {
+            auto cb = cancelBounds().toFloat();
+            g.setColour (juce::Colour (0xff1e1040).withAlpha (hoverCancel ? 0.95f : 0.75f));
+            g.fillRoundedRectangle (cb, 6.f);
+            g.setColour (juce::Colour (0xff5522bb).withAlpha (hoverCancel ? 0.8f : 0.45f));
+            g.drawRoundedRectangle (cb, 6.f, 1.f);
+            g.setColour (juce::Colours::white.withAlpha (hoverCancel ? 0.85f : 0.55f));
+            g.setFont (juce::Font (10.f, juce::Font::bold));
+            g.drawText ("CANCEL", cancelBounds(), juce::Justification::centred);
+        }
+
+        // Confirm button
+        {
+            auto cb = confirmBounds().toFloat();
+            g.setColour (juce::Colour (0xff5522bb).withAlpha (hoverConfirm ? 1.0f : 0.80f));
+            g.fillRoundedRectangle (cb, 6.f);
+            g.setColour (juce::Colour (0xffFFD700).withAlpha (hoverConfirm ? 0.9f : 0.55f));
+            g.drawRoundedRectangle (cb, 6.f, 1.f);
+            g.setColour (juce::Colour (0xffFFD700));
+            g.setFont (juce::Font (10.f, juce::Font::bold));
+            g.drawText ("CONFIRM", confirmBounds(), juce::Justification::centred);
+        }
+    }
+
+    void resized() override {}
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        int visible = maxVisibleRows();
+        int end     = juce::jmin ((int) files.size(), scrollOffset + visible);
+        int nr = -1;
+        for (int i = scrollOffset; i < end; ++i)
+            if (toggleBounds (i).contains (e.getPosition()))
+                nr = i;
+        bool nc = confirmBounds().contains  (e.getPosition());
+        bool nx = cancelBounds().contains   (e.getPosition());
+        bool nu = upArrowBounds().contains  (e.getPosition());
+        bool nd = downArrowBounds().contains (e.getPosition());
+        if (nr != hoverRow || nc != hoverConfirm || nx != hoverCancel
+            || nu != hoverUp || nd != hoverDown)
+        {
+            hoverRow = nr; hoverConfirm = nc; hoverCancel = nx;
+            hoverUp = nu; hoverDown = nd;
+            repaint();
+        }
+    }
+
+    void mouseExit (const juce::MouseEvent&) override
+    {
+        hoverRow = -1; hoverConfirm = hoverCancel = hoverUp = hoverDown = false;
+        dragStartY = -1;
+        repaint();
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        wasDrag = false;
+
+        // Arrow buttons scroll immediately
+        if (needsScroll())
+        {
+            if (upArrowBounds().contains (e.getPosition()))   { scroll (-1); return; }
+            if (downArrowBounds().contains (e.getPosition())) { scroll ( 1); return; }
+        }
+
+        // Confirm / cancel
+        if (confirmBounds().contains (e.getPosition()) ||
+            cancelBounds().contains  (e.getPosition()))
+            return;  // handled in mouseUp so we can distinguish from drag
+
+        // Start drag-to-scroll if inside list area
+        if (listArea().contains (e.getPosition()))
+        {
+            dragStartY   = e.getPosition().y;
+            dragStartOff = scrollOffset;
+        }
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (! needsScroll() || dragStartY < 0) return;
+        int delta = dragStartY - e.getPosition().y;
+        if (std::abs (delta) > 4) wasDrag = true;
+        scrollOffset = juce::jlimit (0, maxScroll(), dragStartOff + delta / 32);
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        dragStartY = -1;
+        if (wasDrag) { wasDrag = false; return; }
+
+        // Toggle row
+        int visible = maxVisibleRows();
+        int end     = juce::jmin ((int) files.size(), scrollOffset + visible);
+        for (int i = scrollOffset; i < end; ++i)
+        {
+            if (toggleBounds (i).contains (e.getPosition()))
+            {
+                reprocessFlags.set (i, ! reprocessFlags[i]);
+                repaint();
+                return;
+            }
+        }
+
+        if (confirmBounds().contains (e.getPosition()))
+        {
+            juce::StringArray toSkip;
+            for (int i = 0; i < files.size(); ++i)
+                if (! reprocessFlags[i])
+                    toSkip.add (files[i]);
+            auto cb = onConfirm;
+            juce::MessageManager::callAsync ([this] {
+                if (auto* p = getParentComponent()) p->removeChildComponent (this);
+                delete this;
+            });
+            if (cb) cb (toSkip);
+            return;
+        }
+
+        if (cancelBounds().contains (e.getPosition()))
+        {
+            auto cb = onCancel;
+            juce::MessageManager::callAsync ([this] {
+                if (auto* p = getParentComponent()) p->removeChildComponent (this);
+                delete this;
+            });
+            if (cb) cb();
+        }
+    }
+};
+
 
 // ── Advanced Settings Panel ───────────────────────────────────────────────────
 struct AdvancedPanel : public juce::Component
 {
     AIMusicProcessor& proc;
 
-    juce::Label        lblDisc        { {}, "Note Filter" };
-    juce::ToggleButton chkDisc        { "Enable" };
-    juce::Label        lblIntensity   { {}, "Intensity" };
+    // ── existing controls ─────────────────────────────────────────────────────
+    juce::Label        lblDisc          { {}, "Note Filter" };
+    juce::ToggleButton chkDisc          { "Enable" };
+    juce::Label        lblIntensity     { {}, "Intensity" };
     juce::Slider       sldIntensity;
     juce::Label        lblIntensityHint { {}, "low = gentle,  high = strict" };
 
-    juce::Label        lblSeq         { {}, "Seq Length (training)" };
+    juce::Label        lblSeq           { {}, "Seq Length (training)" };
     juce::Slider       sldSeqLen;
-    juce::Label        lblSeqHint     { {}, "tokens per training window" };
+    juce::Label        lblSeqHint       { {}, "tokens per training window" };
+
+    // ── fine-tune from checkpoint ─────────────────────────────────────────────
+    juce::Label        lblFineTune      { {}, "Fine-tune" };
+    juce::ToggleButton chkFineTune      { "From checkpoint" };
+    juce::Label        lblBaseCkpt      { {}, "Base model" };
+    juce::TextEditor   edtBaseCkpt;
+    juce::TextButton   btnBrowseBase    { "..." };
+
+    // ── piano roll preview ────────────────────────────────────────────────────
+    juce::Label        lblPreview       { {}, "Filter Preview" };
+    juce::ComboBox     cmbSong;
+    juce::TextButton   btnLoad          { "Load" };
+    juce::Label        lblStatus        { {}, "Enable filter above, then re-process to unlock" };
+    PianoRollView      pianoRoll;
+
+    struct SongData { juce::String name; std::vector<PianoRollView::Note> notes; };
+    std::vector<SongData>            songs;
+    std::shared_ptr<std::atomic<bool>> alive { std::make_shared<std::atomic<bool>> (true) };
 
     static const juce::Colour kBg2;
     static const juce::Colour kFg2;
@@ -907,7 +1491,7 @@ struct AdvancedPanel : public juce::Component
 
     explicit AdvancedPanel (AIMusicProcessor& p) : proc (p)
     {
-        setSize (320, 200);
+        setSize (400, 550);
 
         auto styleLabel = [&] (juce::Label& l, bool small = false) {
             l.setColour (juce::Label::textColourId, kFg2);
@@ -925,6 +1509,7 @@ struct AdvancedPanel : public juce::Component
             addAndMakeVisible (s);
         };
 
+        // Note filter
         styleLabel (lblDisc);
         chkDisc.setToggleState (proc.discIntensity > 0.0f, juce::dontSendNotification);
         chkDisc.setColour (juce::ToggleButton::textColourId, kFg2);
@@ -932,6 +1517,7 @@ struct AdvancedPanel : public juce::Component
             bool on = chkDisc.getToggleState();
             sldIntensity.setEnabled (on);
             proc.discIntensity = on ? (float) sldIntensity.getValue() : 0.0f;
+            updatePianoRoll();
         };
         addAndMakeVisible (chkDisc);
 
@@ -943,23 +1529,199 @@ struct AdvancedPanel : public juce::Component
         sldIntensity.onValueChange = [this] {
             if (chkDisc.getToggleState())
                 proc.discIntensity = (float) sldIntensity.getValue();
+            updatePianoRoll();
         };
         styleSlider (sldIntensity);
         styleLabel (lblIntensityHint, true);
 
+        // Seq length
         styleLabel (lblSeq);
         sldSeqLen.setRange (128, 1024, 128);
         sldSeqLen.setValue (proc.seqLen, juce::dontSendNotification);
         sldSeqLen.onValueChange = [this] { proc.seqLen = (int) sldSeqLen.getValue(); };
         styleSlider (sldSeqLen);
         styleLabel (lblSeqHint, true);
+
+        // Fine-tune from checkpoint
+        styleLabel (lblFineTune);
+        chkFineTune.setToggleState (proc.pretrainCkpt.isNotEmpty(), juce::dontSendNotification);
+        chkFineTune.setColour (juce::ToggleButton::textColourId, kFg2);
+        chkFineTune.onStateChange = [this] {
+            bool on = chkFineTune.getToggleState();
+            edtBaseCkpt.setEnabled (on);
+            btnBrowseBase.setEnabled (on);
+            proc.pretrainCkpt = on ? edtBaseCkpt.getText().trim() : juce::String{};
+        };
+        addAndMakeVisible (chkFineTune);
+
+        styleLabel (lblBaseCkpt);
+        edtBaseCkpt.setText (proc.pretrainCkpt, false);
+        edtBaseCkpt.setMultiLine (false);
+        edtBaseCkpt.setReturnKeyStartsNewLine (false);
+        edtBaseCkpt.setSelectAllWhenFocused (true);
+        edtBaseCkpt.setEnabled (proc.pretrainCkpt.isNotEmpty());
+        edtBaseCkpt.setColour (juce::TextEditor::backgroundColourId,    juce::Colour (0xff252535));
+        edtBaseCkpt.setColour (juce::TextEditor::textColourId,          kFg2);
+        edtBaseCkpt.setColour (juce::TextEditor::outlineColourId,       kAcc2.withAlpha (0.35f));
+        edtBaseCkpt.setColour (juce::TextEditor::focusedOutlineColourId, kAcc2.withAlpha (0.75f));
+        edtBaseCkpt.onTextChange = [this] {
+            if (chkFineTune.getToggleState())
+                proc.pretrainCkpt = edtBaseCkpt.getText().trim();
+        };
+        addAndMakeVisible (edtBaseCkpt);
+
+        btnBrowseBase.setEnabled (proc.pretrainCkpt.isNotEmpty());
+        btnBrowseBase.onClick = [this] {
+            auto chooser = std::make_shared<juce::FileChooser> (
+                "Select base checkpoint (.pt)", juce::File{}, "*.pt");
+            chooser->launchAsync (
+                juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                [this, chooser] (const juce::FileChooser& fc) {
+                    auto result = fc.getResult();
+                    if (result.existsAsFile())
+                    {
+                        edtBaseCkpt.setText (result.getFullPathName(), false);
+                        proc.pretrainCkpt = result.getFullPathName();
+                    }
+                });
+        };
+        addAndMakeVisible (btnBrowseBase);
+
+        // Preview section
+        styleLabel (lblPreview);
+
+        cmbSong.setColour (juce::ComboBox::backgroundColourId,  juce::Colour (0xff313244));
+        cmbSong.setColour (juce::ComboBox::textColourId,         kFg2);
+        cmbSong.setColour (juce::ComboBox::outlineColourId,      kAcc2.withAlpha (0.3f));
+        cmbSong.onChange = [this] {
+            int idx = cmbSong.getSelectedId() - 1;
+            if (idx >= 0 && idx < (int) songs.size())
+                updatePianoRoll (idx);
+        };
+        addAndMakeVisible (cmbSong);
+
+        addAndMakeVisible (btnLoad);
+        btnLoad.onClick = [this] { loadPreview(); };
+
+        styleLabel (lblStatus, true);
+
+        addAndMakeVisible (pianoRoll);
+
+        // Tooltips
+        chkDisc      .setTooltip ("Enable the AI note filter, which uses a trained discriminator to remove "
+                                  "low-quality or atypical notes from your training data before training.");
+        sldIntensity .setTooltip ("How aggressively to filter notes. "
+                                  "Low (~0.05) removes only the worst 5%; high (~1.0) removes up to 50%. "
+                                  "Start low and preview the result before reprocessing.");
+        sldSeqLen    .setTooltip ("Number of tokens per training window. "
+                                  "Longer sequences (512–1024) capture more musical context but require more memory and are slower to train.");
+        chkFineTune  .setTooltip ("Start training from an existing checkpoint rather than from scratch. "
+                                  "Useful for adapting a previously trained model to new material.");
+        edtBaseCkpt  .setTooltip ("Path to the base checkpoint (.pt file) to fine-tune from.");
+        btnBrowseBase.setTooltip ("Browse for a base model checkpoint to fine-tune from.");
+        cmbSong      .setTooltip ("Select a song to preview how the note filter affects its notes.");
+        btnLoad      .setTooltip ("Load the filter preview for the selected song. "
+                                  "Run Process Audio with the filter enabled first to unlock this.");
+    }
+
+    ~AdvancedPanel() override { alive->store (false); }
+
+    void loadPreview()
+    {
+        btnLoad.setEnabled (false);
+        lblStatus.setText ("loading...", juce::dontSendNotification);
+        auto alivePtr = alive;
+        juce::Thread::launch ([this, alivePtr] {
+            auto evDir   = proc.fetchLatestEvents();
+            auto jsonStr = proc.fetchDiscPreview (evDir);
+            juce::MessageManager::callAsync ([this, alivePtr, jsonStr] {
+                if (! alivePtr->load()) return;
+                btnLoad.setEnabled (true);
+                parsePreview (jsonStr);
+            });
+        });
+    }
+
+    void parsePreview (const juce::String& jsonStr)
+    {
+        if (jsonStr.isEmpty() || jsonStr.startsWith ("{\"detail\""))
+        {
+            lblStatus.setText ("No data -process with filter enabled first",
+                               juce::dontSendNotification);
+            return;
+        }
+        auto json  = juce::JSON::parse (jsonStr);
+        auto* root = json.getDynamicObject();
+        if (! root) { lblStatus.setText ("parse error", juce::dontSendNotification); return; }
+
+        auto songsVar = root->getProperty ("songs");
+        auto* arr     = songsVar.getArray();
+        if (! arr || arr->isEmpty())
+        {
+            lblStatus.setText ("no songs in preview data", juce::dontSendNotification);
+            return;
+        }
+
+        songs.clear();
+        cmbSong.clear (juce::dontSendNotification);
+
+        for (int si = 0; si < arr->size(); ++si)
+        {
+            if (auto* sobj = (*arr)[si].getDynamicObject())
+            {
+                SongData sd;
+                sd.name   = sobj->getProperty ("name").toString();
+                auto* narr = sobj->getProperty ("notes").getArray();
+                if (narr)
+                {
+                    for (auto& nv : *narr)
+                    {
+                        if (auto* no = nv.getDynamicObject())
+                        {
+                            PianoRollView::Note nd;
+                            nd.t     = (float)(double) no->getProperty ("t");
+                            nd.dur   = (float)(double) no->getProperty ("dur");
+                            nd.pitch = (int)            no->getProperty ("p");
+                            nd.vel   = (int)            no->getProperty ("v");
+                            nd.inst  = (int)            no->getProperty ("inst");
+                            nd.score = (float)(double) no->getProperty ("score");
+                            sd.notes.push_back (nd);
+                        }
+                    }
+                }
+                cmbSong.addItem (sd.name.isEmpty() ? ("Song " + juce::String (si + 1)) : sd.name,
+                                 si + 1);
+                songs.push_back (std::move (sd));
+            }
+        }
+
+        if (! songs.empty())
+        {
+            cmbSong.setSelectedId (1, juce::dontSendNotification);
+            updatePianoRoll (0);
+            lblStatus.setText ({}, juce::dontSendNotification);
+        }
+    }
+
+    void updatePianoRoll (int songIdx = -1)
+    {
+        if (songIdx >= 0) cmbSong.setSelectedId (songIdx + 1, juce::dontSendNotification);
+        int idx = cmbSong.getSelectedId() - 1;
+        if (idx < 0 || idx >= (int) songs.size()) return;
+        float intensity = (float) sldIntensity.getValue();
+        float thresh    = 0.10f + intensity * 0.45f;
+        pianoRoll.setData (&songs[idx].notes, thresh);
     }
 
     void paint (juce::Graphics& g) override
     {
         g.fillAll (kBg2);
-        g.setColour (kFg2.withAlpha (0.15f));
-        g.drawHorizontalLine (getHeight() / 2, 12.f, (float) getWidth() - 12.f);
+        float sepY = (float) getHeight() * 0.40f;
+        g.setColour (kFg2.withAlpha (0.12f));
+        g.drawHorizontalLine ((int) sepY, 12.f, (float) getWidth() - 12.f);
+        // piano roll border
+        g.setColour (kAcc2.withAlpha (0.18f));
+        g.drawRect (pianoRoll.getBounds().expanded (1), 1);
     }
 
     void resized() override
@@ -967,10 +1729,10 @@ struct AdvancedPanel : public juce::Component
         auto area = getLocalBounds().reduced (14, 12);
         int rowH  = 22, gap = 4;
 
-        // ── Note Filter section ───────────────────────────────────────────────
+        // ── Note Filter ───────────────────────────────────────────────────────
         auto discRow = area.removeFromTop (rowH);
-        lblDisc    .setBounds (discRow.removeFromLeft (90));
-        chkDisc    .setBounds (discRow.removeFromLeft (70));
+        lblDisc .setBounds (discRow.removeFromLeft (90));
+        chkDisc .setBounds (discRow.removeFromLeft (70));
         area.removeFromTop (gap);
         auto intRow = area.removeFromTop (rowH);
         lblIntensity.setBounds (intRow.removeFromLeft (68));
@@ -979,15 +1741,44 @@ struct AdvancedPanel : public juce::Component
         area.removeFromTop (2);
         lblIntensityHint.setBounds (area.removeFromTop (14));
 
-        area.removeFromTop (10); // separator space
+        area.removeFromTop (10);
 
-        // ── Seq Length section ────────────────────────────────────────────────
-        lblSeq    .setBounds (area.removeFromTop (rowH));
+        // ── Seq Length ────────────────────────────────────────────────────────
+        lblSeq.setBounds (area.removeFromTop (rowH));
         area.removeFromTop (gap);
-        auto seqRow = area.removeFromTop (rowH);
-        sldSeqLen .setBounds (seqRow);
+        sldSeqLen.setBounds (area.removeFromTop (rowH));
         area.removeFromTop (2);
         lblSeqHint.setBounds (area.removeFromTop (14));
+
+        area.removeFromTop (12);
+
+        // ── Fine-tune from checkpoint ─────────────────────────────────────────
+        auto ftRow = area.removeFromTop (rowH);
+        lblFineTune.setBounds (ftRow.removeFromLeft (72));
+        chkFineTune.setBounds (ftRow);
+        area.removeFromTop (gap);
+        auto baseRow = area.removeFromTop (rowH);
+        lblBaseCkpt  .setBounds (baseRow.removeFromLeft (72));
+        baseRow.removeFromLeft (4);
+        btnBrowseBase.setBounds (baseRow.removeFromRight (28));
+        baseRow.removeFromRight (4);
+        edtBaseCkpt  .setBounds (baseRow);
+
+        area.removeFromTop (12);
+
+        // ── Preview header ────────────────────────────────────────────────────
+        auto hdr = area.removeFromTop (rowH);
+        lblPreview.setBounds (hdr.removeFromLeft (90));
+        btnLoad   .setBounds (hdr.removeFromRight (50));
+        hdr.removeFromRight (4);
+        cmbSong   .setBounds (hdr);
+
+        area.removeFromTop (4);
+        lblStatus .setBounds (area.removeFromTop (14));
+        area.removeFromTop (6);
+
+        // ── Piano roll ────────────────────────────────────────────────────────
+        pianoRoll.setBounds (area);
     }
 };
 
@@ -1001,10 +1792,10 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
       mirrorUILAF       (std::make_unique<MirrorUILAF>()),
       smallToggleLAF    (std::make_unique<SmallToggleLAF>()),
       mirrorKnobLAF     (std::make_unique<MirrorKnobLAF>()),
-      keyButtonLAF      (std::make_unique<KeyButtonLAF>())
+      keyButtonLAF      (std::make_unique<VanityButtonLAF>())
 {
     setSize (480, 440);
-    setLookAndFeel (mirrorUILAF.get());   // global — cascades to all children without explicit LAF
+    setLookAndFeel (mirrorUILAF.get());   // global -cascades to all children without explicit LAF
     addAndMakeVisible (*mirrorAnim);
 
     // ── Tab bar ───────────────────────────────────────────────────────────────
@@ -1015,6 +1806,25 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     styleTab (tabGenerate);
     tabProcess .onClick = [this] { currentTab = 0; updateTabVisibility(); };
     tabGenerate.onClick = [this] { currentTab = 1; updateTabVisibility(); };
+
+    // ── Project name ──────────────────────────────────────────────────────────
+    lblProjectName.setText ("Project", juce::dontSendNotification);
+    lblProjectName.setColour (juce::Label::textColourId, kFg.withAlpha (0.70f));
+    lblProjectName.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (lblProjectName);
+
+    edtProjectName.setText (proc.projectName, false);
+    edtProjectName.setMultiLine (false);
+    edtProjectName.setReturnKeyStartsNewLine (false);
+    edtProjectName.setSelectAllWhenFocused (true);
+    edtProjectName.setColour (juce::TextEditor::backgroundColourId,  juce::Colour (0xff252535));
+    edtProjectName.setColour (juce::TextEditor::textColourId,         kFg);
+    edtProjectName.setColour (juce::TextEditor::outlineColourId,      kAcc.withAlpha (0.35f));
+    edtProjectName.setColour (juce::TextEditor::focusedOutlineColourId, kAcc.withAlpha (0.75f));
+    edtProjectName.onTextChange = [this] {
+        proc.projectName = edtProjectName.getText().trim();
+    };
+    addAndMakeVisible (edtProjectName);
 
     auto makeLabel = [&] (juce::Label& l, const juce::String& text) {
         l.setText (text, juce::dontSendNotification);
@@ -1047,7 +1857,22 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     btnRunProcess.onClick = [this] {
         if (proc.audioFolder.isEmpty()) { browseFolder (true); return; }
         proc.selectedTracks = buildTracksString();
-        proc.startProcess (proc.audioFolder);
+
+        auto existing = proc.fetchExistingProcessed();
+        if (existing.isEmpty())
+        {
+            proc.startProcess (proc.audioFolder, {});
+            return;
+        }
+
+        auto* dlg = new ReprocessDialog (existing);
+        dlg->setBounds (getLocalBounds());
+        dlg->onConfirm = [this] (juce::StringArray filesToSkip) {
+            proc.startProcess (proc.audioFolder, filesToSkip);
+        };
+        dlg->onCancel = [] {};
+        addAndMakeVisible (dlg);
+        dlg->toFront (false);
     };
     btnTrain.onClick = [this] { browseEventsAndTrain(); };
     addAndMakeVisible (btnRunProcess);
@@ -1055,7 +1880,7 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
 
     // ── Advanced settings button (key icon) ───────────────────────────────────
     btnAdvanced.setLookAndFeel (keyButtonLAF.get());
-    btnAdvanced.setTooltip ("Advanced settings");
+
     btnAdvanced.onClick = [this] {
         juce::DialogWindow::LaunchOptions opts;
         opts.dialogTitle             = "Advanced Settings";
@@ -1198,9 +2023,128 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
         repaint();
     };
 
+    // ── Tooltips ──────────────────────────────────────────────────────────────
+    // Tab buttons
+    tabProcess .setTooltip ("Process your audio files into training data, then train an AI model on them.");
+    tabGenerate.setTooltip ("Generate new MIDI using a trained model. Switch here after training finishes.");
+
+    // Project name
+    lblProjectName.setTooltip ("A name for this project. Processed data and the trained model are saved "
+                                "under this name so you can have multiple projects side by side.");
+    edtProjectName.setTooltip ("A name for this project. Processed data and the trained model are saved "
+                                "under this name so you can have multiple projects side by side.");
+
+    // Process & Train tab
+    btnBrowseFolder.setTooltip ("Choose the folder containing your audio files (.wav/.mp3). "
+                                "The plugin will separate each file into stems and convert them to MIDI.");
+    chkLeadVox .setTooltip ("Include lead vocals in the training data. Uncheck to leave this instrument out of the model.");
+    chkHarmVox .setTooltip ("Include harmony / backing vocals in the training data.");
+    chkGuitar  .setTooltip ("Include guitar in the training data.");
+    chkBass    .setTooltip ("Include bass in the training data.");
+    chkDrums   .setTooltip ("Include drums in the training data.");
+    chkOther   .setTooltip ("Include other / miscellaneous instruments in the training data.");
+    btnRunProcess.setTooltip ("Separate your audio files into stems, convert to MIDI events, "
+                              "and prepare the dataset for training. Run this before hitting Train.");
+    btnTrain     .setTooltip ("Train an AI model on the processed MIDI data. "
+                              "The model learns the musical style of your audio files.");
+
+    // Generate tab
+    btnBrowseCkpt.setTooltip ("Select a trained model file (.pt) to generate from. "
+                              "After training, the model is saved in your project folder.");
+    lblCkpt      .setTooltip ("The trained model currently selected for generation.");
+    lblTemperature.setTooltip ("Controls randomness. Lower values (0.5) are more predictable; "
+                               "higher values (1.2+) are more experimental.");
+    sldTemperature.setTooltip ("Controls randomness. Lower values (0.5) are more predictable; "
+                               "higher values (1.2+) are more experimental.");
+    lblTopP.setTooltip ("Nucleus sampling threshold - only the most likely tokens up to this "
+                        "cumulative probability are considered. Lower = safer, higher = more varied.");
+    sldTopP.setTooltip ("Nucleus sampling threshold - only the most likely tokens up to this "
+                        "cumulative probability are considered. Lower = safer, higher = more varied.");
+    lblMaxTokens.setTooltip ("Maximum number of musical events to generate. More tokens = longer output.");
+    sldMaxTokens.setTooltip ("Maximum number of musical events to generate. More tokens = longer output.");
+    lblTempo.setTooltip ("Tempo in BPM for the generated MIDI.");
+    sldTempo    .setTooltip ("Tempo in BPM for the generated MIDI.");
+    btnSyncTempo.setTooltip ("Lock the tempo to your DAW's current BPM.");
+    lblSubdivision.setTooltip ("Grid subdivision used to snap note timings when Quantize is on.");
+    cmbSubdivision.setTooltip ("Grid subdivision used to snap note timings when Quantize is on.");
+    btnTriplets   .setTooltip ("Allow triplet subdivisions (e.g. 1/8T) in the generated rhythm.");
+    btnQuantize   .setTooltip ("Snap all generated notes to the nearest grid subdivision.");
+    btnSeedFromData.setTooltip ("Seed generation from a random phrase in your training data "
+                                "instead of starting from scratch - tends to stay closer to your style.");
+    btnGenerate.setTooltip ("Generate a new MIDI sequence using the selected model and settings.");
+
+    // Title bar / shared
+    btnAdvanced.setTooltip ("Advanced settings - note filter, sequence length, fine-tune from a base checkpoint.");
+    btnSavePreset.setTooltip ("Save the current settings to a preset file.");
+    btnLoadPreset.setTooltip ("Load settings from a previously saved preset file.");
+    btnCancel  .setTooltip ("Cancel the currently running job.");
+    btnShowMidi.setTooltip ("Show the generated MIDI file in Finder.");
+    btnPreview .setTooltip ("Play back the generated MIDI through a basic synth for a quick listen.");
+
+    addMouseListener (&longPressHelper, true);  // touch long-press tooltips
+
     updateTabVisibility();
     startTimer (1500);
 }
+
+// ── LongPressHelper ───────────────────────────────────────────────────────────
+
+juce::String AIMusicEditor::LongPressHelper::findTooltip (juce::Component* c)
+{
+    while (c != nullptr)
+    {
+        if (auto* tc = dynamic_cast<juce::TooltipClient*> (c))
+        {
+            auto t = tc->getTooltip();
+            if (t.isNotEmpty()) return t;
+        }
+        c = c->getParentComponent();
+    }
+    return {};
+}
+
+void AIMusicEditor::LongPressHelper::mouseDown (const juce::MouseEvent& e)
+{
+    pressedOn = e.eventComponent;
+    pressPos  = e.position;
+    startTimer (600);
+}
+
+void AIMusicEditor::LongPressHelper::mouseUp (const juce::MouseEvent&)
+{
+    stopTimer();
+}
+
+void AIMusicEditor::LongPressHelper::mouseDrag (const juce::MouseEvent& e)
+{
+    if (e.getDistanceFromDragStart() > 8.f)
+        stopTimer();
+}
+
+void AIMusicEditor::LongPressHelper::timerCallback()
+{
+    stopTimer();
+    if (pressedOn == nullptr) return;
+
+    auto text = findTooltip (pressedOn);
+    if (text.isEmpty()) return;
+
+    auto* bubble = new juce::BubbleMessageComponent();
+    owner.addAndMakeVisible (bubble);
+    bubble->setColour (juce::BubbleComponent::backgroundColourId, juce::Colour (0xff252535));
+    bubble->setColour (juce::BubbleComponent::outlineColourId,    juce::Colour (0xff89b4fa));
+
+    juce::AttributedString str;
+    str.setWordWrap     (juce::AttributedString::byWord);
+    str.setJustification (juce::Justification::centredLeft);
+    str.append (text, juce::Font (12.0f), juce::Colour (0xffcdd6f4));
+
+    auto pos = owner.getLocalPoint (pressedOn, pressPos).toInt();
+    bubble->showAt (juce::Rectangle<int> (pos.x, pos.y, 1, 1), str,
+                    3000 /*ms*/, true /*hideOnClick*/, true /*deleteSelf*/);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 AIMusicEditor::~AIMusicEditor()
 {
@@ -1235,7 +2179,7 @@ void AIMusicEditor::makeKnob (juce::Slider& s, double mn, double mx, double def,
 
 void AIMusicEditor::paint (juce::Graphics& g)
 {
-    // Pull phase first — drives both the background pulse and everything else
+    // Pull phase first -drives both the background pulse and everything else
     float tPhase = static_cast<MirrorMirror*> (mirrorAnim.get())->phase;
 
     // ── Slowly pulsing diagonal background gradient ───────────────────────────
@@ -1262,7 +2206,7 @@ void AIMusicEditor::paint (juce::Graphics& g)
         g.setGradientFill (bg2);
         g.fillRect (getLocalBounds());
 
-        // Slow drifting radial bloom — very faint so it reads as atmosphere not colour
+        // Slow drifting radial bloom -very faint so it reads as atmosphere not colour
         float rx = w * (0.25f + 0.35f * (0.5f + 0.5f * std::sin (tPhase * 0.07f)));
         float ry = h * 0.65f;
         juce::ColourGradient radial (
@@ -1322,30 +2266,139 @@ void AIMusicEditor::paint (juce::Graphics& g)
         g.drawRoundedRectangle (ring, 6.f, 1.5f);
     };
 
-    // "Clear" — gold pulse (error context, tap to dismiss)
+    // "Clear" -gold pulse (error context, tap to dismiss)
     if (btnCancel.getButtonText() == "Clear")
         drawPulse (btnCancel,  juce::Colour (0xffFFD700), juce::Colour (0xffFFBB44));
 
-    // "Show MIDI" — blue pulse (success, tap to reveal)
+    // "Show MIDI" -blue pulse (success, tap to reveal)
     drawPulse (btnShowMidi, juce::Colour (0xff89b4fa), juce::Colour (0xffaaddff));
 
-    // "Preview" — mauve pulse while playing (matches dark theme palette)
+    // "Preview" -mauve pulse while playing (matches dark theme palette)
     if (proc.isPreviewPlaying())
         drawPulse (btnPreview, juce::Colour (0xffcba6f7), juce::Colour (0xffe0b8ff));
 
-    // ── Preprocessing progress bar ────────────────────────────────────────────
+    // ── Progress bar (processing / training / generating) ────────────────────
     auto& ps = proc.lastStatus;
-    if (ps.stage == "processing" && ps.progress >= 0.f)
+    bool isProcessing  = (ps.stage == "processing" && ps.progress >= 0.f);
+    bool isTraining    = (ps.stage == "training");
+    bool isGenerating  = (ps.stage == "generating");
+
+    if (isProcessing || isTraining || isGenerating)
     {
-        juce::Rectangle<int> barBounds (lblStatus.getX(),
-                                        lblStatus.getBottom() + 1,
-                                        lblStatus.getWidth(),
-                                        4);
+        // Each bar row is 11px tall: 8pt label on left, 4px bar track on right centred vertically
+        constexpr int kRowH  = 11;
+        constexpr int kBarH  = 4;
+        constexpr int kLblW  = 38;   // width of the text column
+        constexpr int kGap   = 4;
+
+        int rowX = lblStatus.getX();
+        int rowW = lblStatus.getWidth();
+        int row1Y = lblStatus.getBottom() + 2;
+        int row2Y = row1Y + kRowH + 2;
+
+        // Bar track rectangles (right of label)
+        int trackX = rowX + kLblW + kGap;
+        int trackW = rowW - kLblW - kGap;
+
+        juce::Rectangle<int> barBounds  (trackX, row1Y + (kRowH - kBarH) / 2, trackW, kBarH);
+        juce::Rectangle<int> batchBounds (trackX, row2Y + (kRowH - kBarH) / 2, trackW, kBarH);
+
+        // Continuous left-to-right chase (wraps, never bounces)
+        auto drawChase = [&] (juce::Rectangle<int> r)
+        {
+            double t   = std::fmod (juce::Time::getMillisecondCounterHiRes() / 1200.0, 1.0);
+            int    sw  = juce::roundToInt (r.getWidth() * 0.30f);
+            int    sx  = r.getX() + juce::roundToInt ((r.getWidth() + sw) * (float) t) - sw;
+            // Fade the leading edge so it looks like a comet, not a hard block
+            for (int i = 0; i < sw; ++i)
+            {
+                float alpha = (float)(i + 1) / (float) sw * 0.8f;
+                g.setColour (kAcc.withAlpha (alpha));
+                g.fillRect (juce::Rectangle<int> (sx + i, r.getY(), 1, r.getHeight()));
+            }
+        };
+
+        // ── Labels ───────────────────────────────────────────────────────────
+        g.setFont (juce::Font (8.0f));
+        g.setColour (kFg.withAlpha (0.45f));
+        if (isTraining)
+        {
+            g.drawText ("epochs", juce::Rectangle<int> (rowX, row1Y, kLblW, kRowH),
+                        juce::Justification::centredRight, false);
+            g.drawText ("batch",  juce::Rectangle<int> (rowX, row2Y, kLblW, kRowH),
+                        juce::Justification::centredRight, false);
+        }
+
+        // ── Main bar: epoch progress ─────────────────────────────────────────
         g.setColour (juce::Colour (0xff313244));
         g.fillRoundedRectangle (barBounds.toFloat(), 2.f);
-        auto filled = barBounds.withWidth (juce::roundToInt (barBounds.getWidth() * ps.progress));
-        g.setColour (kAcc);
-        g.fillRoundedRectangle (filled.toFloat(), 2.f);
+
+        if (isProcessing)
+        {
+            auto filled = barBounds.withWidth (juce::roundToInt (barBounds.getWidth() * ps.progress));
+            g.setColour (kAcc);
+            g.fillRoundedRectangle (filled.toFloat(), 2.f);
+        }
+        else if (isTraining && ps.totalEpochs > 0)
+        {
+            // Solid fill for completed epochs (may be 0 while in first epoch)
+            float frac  = juce::jlimit (0.f, 1.f, (float) ps.epoch / (float) ps.totalEpochs);
+            auto filled = barBounds.withWidth (juce::roundToInt (barBounds.getWidth() * frac));
+            g.setColour (kAcc);
+            g.fillRoundedRectangle (filled.toFloat(), 2.f);
+        }
+        else
+        {
+            // Generating or training without epoch info -animate the main bar
+            drawChase (barBounds);
+        }
+
+        // ── Batch bar: within-epoch progress ────────────────────────────────
+        if (isTraining)
+        {
+            g.setColour (juce::Colour (0xff313244));
+            g.fillRoundedRectangle (batchBounds.toFloat(), 2.f);
+
+            if (ps.batchProgress >= 0.f)
+            {
+                // Deterministic fill: how far through current epoch's batches
+                auto bFilled = batchBounds.withWidth (juce::roundToInt (batchBounds.getWidth() * ps.batchProgress));
+                g.setColour (kAcc.withAlpha (0.65f));
+                g.fillRoundedRectangle (bFilled.toFloat(), 2.f);
+            }
+            else
+            {
+                // Waiting for first batch report -chase shows training is alive
+                drawChase (batchBounds);
+            }
+        }
+        else if (isGenerating)
+        {
+            // Single animated bar for generating
+            drawChase (barBounds);
+        }
+
+        // ── Epoch / val loss line below the bars ─────────────────────────────
+        if (isTraining)
+        {
+            int textY = row2Y + kRowH + 3;
+            juce::String epochLine;
+            if (ps.epoch >= 0 && ps.totalEpochs > 0)
+                epochLine = "Epoch " + juce::String (ps.epoch) + " / " + juce::String (ps.totalEpochs);
+            if (ps.valLoss >= 0.0)
+            {
+                if (epochLine.isNotEmpty()) epochLine += "   ";
+                epochLine += "val loss: " + juce::String (ps.valLoss, 4);
+            }
+            if (epochLine.isNotEmpty())
+            {
+                g.setFont (juce::Font (9.5f));
+                g.setColour (kFg.withAlpha (0.45f));
+                g.drawText (epochLine,
+                            juce::Rectangle<int> (rowX, textY, rowW, 12),
+                            juce::Justification::centred, false);
+            }
+        }
     }
 }
 
@@ -1353,7 +2406,7 @@ void AIMusicEditor::resized()
 {
     auto area = getLocalBounds().reduced (12);
 
-    // Title strip — key (upper-left) and Save/Load (upper-right)
+    // Title strip -key (upper-left) and Save/Load (upper-right)
     {
         auto titleStrip = getLocalBounds().removeFromTop (36).reduced (8, 7);
         btnAdvanced.setBounds (titleStrip.removeFromLeft (26).withSizeKeepingCentre (26, 26));
@@ -1379,7 +2432,8 @@ void AIMusicEditor::resized()
     int  tabW   = tabRow.getWidth() / 2;
     tabProcess .setBounds (tabRow.removeFromLeft (tabW));
     tabGenerate.setBounds (tabRow);
-    area.removeFromTop (6);
+    area.removeFromTop (5);
+
 
     // Reserve shared status from bottom (status + msg + warning + cancel)
     auto statusArea = area.removeFromBottom (90);
@@ -1387,6 +2441,15 @@ void AIMusicEditor::resized()
     if (currentTab == 0)
     {
         // ── Process & Train tab ──────────────────────────────────────────────
+        // Project name at the very top of this tab
+        {
+            auto projRow = area.removeFromTop (24);
+            lblProjectName.setBounds (projRow.removeFromLeft (52));
+            projRow.removeFromLeft (5);
+            edtProjectName.setBounds (projRow.removeFromLeft (210));
+        }
+        area.removeFromTop (6);
+
         auto folderRow = area.removeFromTop (24);
         btnBrowseFolder.setBounds (folderRow.removeFromRight (120));
         folderRow.removeFromRight (4);
@@ -1424,7 +2487,7 @@ void AIMusicEditor::resized()
         auto knobArea = area.removeFromTop (112);
         int  knobW    = knobArea.getWidth() / 5;
         using KP = std::pair<juce::Slider*, juce::Label*>;
-        // All four knobs identical height — Sync sits in its own row below
+        // All four knobs identical height -Sync sits in its own row below
         for (auto pair : { KP {&sldTemperature, &lblTemperature},
                            KP {&sldTopP,         &lblTopP},
                            KP {&sldMaxTokens,    &lblMaxTokens},
@@ -1480,6 +2543,7 @@ void AIMusicEditor::updateTabVisibility()
                            !onProcess ? kAcc.withAlpha (0.25f) : juce::Colour (0xff313244));
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &lblProjectName, &edtProjectName,
              &lblFolder, &btnBrowseFolder, &lblInstruments,
              &chkLeadVox, &chkHarmVox, &chkGuitar, &chkBass, &chkDrums, &chkOther,
              &btnRunProcess, &btnTrain })
@@ -1533,10 +2597,26 @@ void AIMusicEditor::timerCallback()
 
     // Celebration burst + wink when a job finishes
     if (curStage == "done" && kRunning.contains (prevStage))
+    {
         mm.triggerCelebration();
+        // Auto-update checkpoint path when training completes via a named project
+        if (prevStage == "training" && proc.lastStatus.ckptPath.isNotEmpty())
+        {
+            proc.ckptPath = proc.lastStatus.ckptPath;
+            lblCkpt.setText (proc.ckptPath, juce::dontSendNotification);
+        }
+    }
 
     prevIsError = curIsError;
     prevStage   = curStage;
+
+    // Animate vanity icon shimmer in sync with MirrorMirror phase
+    static_cast<VanityButtonLAF*> (keyButtonLAF.get())->phase = mm.phase;
+    btnAdvanced.repaint();
+
+    // Keep the progress bar repainting while a job is running
+    if (kRunning.contains (curStage))
+        repaint();
 }
 
 void AIMusicEditor::updateStatusLabel()
@@ -1560,12 +2640,9 @@ void AIMusicEditor::updateStatusLabel()
     auto& s = proc.lastStatus;
     lblStatus.setText ("Status: " + s.stage, juce::dontSendNotification);
 
-    if (s.stage == "training" && s.epoch >= 0)
+    if (s.stage == "training")
     {
-        juce::String ep = "Epoch " + juce::String (s.epoch);
-        if (s.totalEpochs > 0) ep += " / " + juce::String (s.totalEpochs);
-        if (s.valLoss >= 0)    ep += "   val loss: " + juce::String (s.valLoss, 4);
-        lblMessage.setText (ep, juce::dontSendNotification);
+        lblMessage.setText ({}, juce::dontSendNotification);
     }
     else
     {
@@ -1664,7 +2741,7 @@ void AIMusicEditor::browseFolder (bool startAfterSelect)
                 if (startAfterSelect)
                 {
                     proc.selectedTracks = buildTracksString();
-                    proc.startProcess (proc.audioFolder);
+                    proc.startProcess (proc.audioFolder, {});
                 }
             }
         });
@@ -1713,7 +2790,7 @@ void AIMusicEditor::browseEventsAndTrain()
 
             if (! folder.getChildFile ("events_train.pkl").existsAsFile())
             {
-                localErrorMessage = "Selected folder has no events_train.pkl — run Process Audio first.";
+                localErrorMessage = "Selected folder has no events_train.pkl -run Process Audio first.";
                 updateStatusLabel();
                 return;
             }
@@ -1817,6 +2894,7 @@ void AIMusicEditor::refreshFromProcessor()
                        juce::dontSendNotification);
     lblFolder.setText (proc.audioFolder.isNotEmpty() ? proc.audioFolder : "No folder selected",
                        juce::dontSendNotification);
+    edtProjectName.setText (proc.projectName, false);
 
     if (proc.selectedTracks.isEmpty())
     {
@@ -1835,4 +2913,72 @@ void AIMusicEditor::refreshFromProcessor()
     }
 
     updateTokenWarning();
+}
+
+// ── Boop gold confetti — drawn over all children so nothing occludes it ───────
+void AIMusicEditor::paintOverChildren (juce::Graphics& g)
+{
+    auto& mm = *static_cast<MirrorMirror*> (mirrorAnim.get());
+    if (mm.boopPhase < 0.f) return;
+
+    // Burst origin: nose position translated to editor coordinates
+    auto  mb  = mirrorAnim->getBounds();
+    auto  np  = mm.noseCenter();
+    float cx  = (float) mb.getX() + np.x;
+    float cy  = (float) mb.getY() + np.y;
+
+    // Golden palette
+    static const juce::Colour kRC[] = {
+        juce::Colour (0xffFFD700), juce::Colour (0xffFFEC6E),
+        juce::Colour (0xffFFF3B0), juce::Colour (0xffFFC200),
+        juce::Colour (0xffDAA520), juce::Colour (0xffFFE08A),
+    };
+
+    // 20 particles, angles spread in all directions (degrees -> radians baked in)
+    // Each has: angle (rad), speed (px/s), delay (s)
+    static const float kAngle[] = {
+         0.00f,  0.31f,  0.63f,  0.94f,  1.26f,  1.57f,  1.88f,  2.20f,
+         2.51f,  2.83f,  3.14f,  3.46f,  3.77f,  4.08f,  4.40f,  4.71f,
+         5.03f,  5.34f,  5.65f,  5.97f
+    };
+    static const float kSpeed[] = {
+        110.f, 85.f, 130.f, 70.f, 100.f, 120.f, 80.f, 115.f,
+         90.f, 105.f, 95.f, 125.f, 75.f, 108.f, 88.f, 118.f,
+         72.f, 132.f, 98.f,  82.f
+    };
+    static const float kDelay[] = {
+        0.00f, 0.02f, 0.00f, 0.03f, 0.01f, 0.00f, 0.02f, 0.04f,
+        0.01f, 0.03f, 0.00f, 0.02f, 0.04f, 0.01f, 0.03f, 0.00f,
+        0.02f, 0.01f, 0.03f, 0.02f
+    };
+    constexpr int kN = 20;
+
+    for (int i = 0; i < kN; ++i)
+    {
+        float pt = mm.boopPhase - kDelay[i];
+        if (pt <= 0.f) continue;
+
+        float vx = kSpeed[i] * std::cos (kAngle[i]);
+        float vy = kSpeed[i] * std::sin (kAngle[i]);
+        float px = cx + vx * pt + std::sin (pt * 3.1f + i) * 3.f;
+        float py = cy + vy * pt + 40.f * pt * pt;  // gentle gravity on all
+
+        float alpha = std::max (0.f, 1.f - pt / 2.0f);
+        if (alpha < 0.02f) continue;
+
+        // Pop open fast, then shrink with shimmer
+        float sz_base = (pt < 0.25f) ? (8.f * pt / 0.25f)
+                                     : (8.f * std::exp (-(pt - 0.25f) * 2.5f));
+        float pulse = 1.f + 0.32f * std::sin (pt * 18.f + (float) i * 2.1f);
+        float sz = std::max (0.f, sz_base * pulse);
+
+        auto col = kRC[i % 6];
+        g.setColour (col.withAlpha (alpha));
+        g.fillEllipse (px - sz, py - sz, sz * 2.f, sz * 2.f);
+        // Cross arms
+        g.setColour (col.withAlpha (alpha * 0.6f));
+        float arm = sz * 2.2f;
+        g.drawLine (px - arm, py, px + arm, py, 1.0f);
+        g.drawLine (px, py - arm, px, py + arm, 1.0f);
+    }
 }

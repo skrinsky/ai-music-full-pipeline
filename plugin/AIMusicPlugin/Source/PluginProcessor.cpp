@@ -338,7 +338,8 @@ juce::AudioProcessorEditor* AIMusicProcessor::createEditor()
 
 // ── pipeline actions ──────────────────────────────────────────────────────────
 
-void AIMusicProcessor::startProcess (const juce::String& folder)
+void AIMusicProcessor::startProcess (const juce::String& folder,
+                                     const juce::StringArray& filesToSkip)
 {
     audioFolder = folder;
 
@@ -355,14 +356,21 @@ void AIMusicProcessor::startProcess (const juce::String& folder)
             tryLaunchServerFromRepoRoot (repoRoot);
     }
 
-    client.postProcess (folder, selectedTracks, true, discIntensity);
+    client.postProcess (folder, selectedTracks, true, discIntensity, projectName, filesToSkip);
 }
 
 void AIMusicProcessor::startTrain (const juce::String& eventsDir)
 {
+    // If a project name is set, pass it and let the server derive all paths.
+    if (projectName.isNotEmpty())
+    {
+        client.postTrain ({}, {}, "auto", 200, seqLen, projectName, pretrainCkpt);
+        return;
+    }
+    // Legacy: explicit events dir (e.g. from browseEventsAndTrain)
     if (eventsDir.isNotEmpty())
     {
-        client.postTrain (eventsDir, ckptPath, "auto", 200, seqLen);
+        client.postTrain (eventsDir, ckptPath, "auto", 200, seqLen, {}, pretrainCkpt);
         return;
     }
     auto startDir2 = juce::File (ckptPath.isNotEmpty() ? ckptPath : audioFolder);
@@ -370,7 +378,7 @@ void AIMusicProcessor::startTrain (const juce::String& eventsDir)
     auto dir       = repoRoot2.exists()
                          ? repoRoot2.getChildFile ("runs/events").getFullPathName()
                          : juce::String ("runs/events");
-    client.postTrain (dir, ckptPath, "auto", 200, seqLen);
+    client.postTrain (dir, ckptPath, "auto", 200, seqLen, {}, pretrainCkpt);
 }
 
 void AIMusicProcessor::startGenerate()
@@ -381,7 +389,7 @@ void AIMusicProcessor::startGenerate()
     pendingJobId = client.postGenerate (ckptPath, {}, {},
                                         temperature, topP, bpm,
                                         straightStep, tripletStep, maxTokens,
-                                        seedFromData);
+                                        seedFromData, projectName);
 }
 
 juce::String AIMusicProcessor::getPref (const juce::String& key, const juce::String& fallback)
@@ -626,6 +634,8 @@ void AIMusicProcessor::getStateInformation (juce::MemoryBlock& destData)
     xml.setAttribute ("selectedTracks", selectedTracks);
     xml.setAttribute ("discIntensity",  discIntensity);
     xml.setAttribute ("seqLen",         seqLen);
+    xml.setAttribute ("projectName",    projectName);
+    xml.setAttribute ("pretrainCkpt",   pretrainCkpt);
     copyXmlToBinary (xml, destData);
 }
 
@@ -647,6 +657,8 @@ void AIMusicProcessor::setStateInformation (const void* data, int sizeInBytes)
     selectedTracks  =         xml->getStringAttribute ("selectedTracks", selectedTracks);
     discIntensity   = (float) xml->getDoubleAttribute ("discIntensity",  discIntensity);
     seqLen          =         xml->getIntAttribute    ("seqLen",         seqLen);
+    projectName     =         xml->getStringAttribute ("projectName",    projectName);
+    pretrainCkpt    =         xml->getStringAttribute ("pretrainCkpt",   pretrainCkpt);
     if (onStateLoaded)
         juce::MessageManager::callAsync (onStateLoaded);
 }

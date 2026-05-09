@@ -8,8 +8,10 @@ struct PipelineStatus
     int    epoch      = -1;
     int    totalEpochs= -1;
     double valLoss    = -1.0;
-    float  progress   = -1.f; // 0–1 during preprocessing, -1 otherwise
+    float  progress      = -1.f; // 0–1 during preprocessing, -1 otherwise
+    float  batchProgress = -1.f; // 0–1 within current training epoch
     juce::String error;
+    juce::String ckptPath;   // filled when training completes (project-derived path)
 };
 
 // Thin HTTP client that talks to plugin/server.py on localhost:7437
@@ -22,16 +24,23 @@ public:
     PipelineStatus getStatus();
 
     // Fire-and-forget POST calls — server runs jobs in background threads
-    bool postProcess (const juce::String& audioFolder,
-                      const juce::String& tracks = {},
-                      bool normalizeKey = true,
-                      float discIntensity = 0.0f);
+    // Returns filenames that already have stems from a previous run
+    juce::StringArray fetchExistingProcessed (const juce::String& audioFolder);
 
-    bool postTrain   (const juce::String& eventsDir  = "runs/events",
-                      const juce::String& ckptPath   = "runs/checkpoints/es_model.pt",
-                      const juce::String& device     = "auto",
-                      int epochs = 200,
-                      int seqLen = 512);
+    bool postProcess (const juce::String&      audioFolder,
+                      const juce::String&      tracks        = {},
+                      bool                     normalizeKey  = true,
+                      float                    discIntensity = 0.0f,
+                      const juce::String&      projectName   = {},
+                      const juce::StringArray& filesToSkip   = {});
+
+    bool postTrain   (const juce::String& eventsDir    = "runs/events",
+                      const juce::String& ckptPath     = "runs/checkpoints/es_model.pt",
+                      const juce::String& device       = "auto",
+                      int                 epochs       = 200,
+                      int                 seqLen       = 512,
+                      const juce::String& projectName  = {},
+                      const juce::String& pretrainCkpt = {});
 
     // Returns job_id on success, empty string on failure
     juce::String postGenerate (const juce::String& ckpt,
@@ -43,7 +52,8 @@ public:
                                int   gridStraightStep            = 6,
                                int   gridTripletStep             = 0,
                                int   maxTokens                   = 512,
-                               bool  useSeed                     = false);
+                               bool  useSeed                     = false,
+                               const juce::String& projectName  = {});
 
     bool postCancel();
 
@@ -59,6 +69,9 @@ public:
 
     // Returns path to most recently created events folder, or empty string
     juce::String fetchLatestEvents();
+
+    // Returns disc_preview.json content as a JSON string, or empty on failure
+    juce::String fetchDiscPreview (const juce::String& eventsDir = {});
 
 private:
     juce::String baseUrl;

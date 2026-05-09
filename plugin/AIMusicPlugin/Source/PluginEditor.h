@@ -11,6 +11,7 @@ public:
     ~AIMusicEditor() override;
 
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void resized() override;
 
 private:
@@ -20,6 +21,10 @@ private:
     juce::TextButton tabProcess  { "Process & Train" };
     juce::TextButton tabGenerate { "Generate" };
     int currentTab { 0 };
+
+    // ── Project name ──────────────────────────────────────────────────────────
+    juce::Label      lblProjectName;
+    juce::TextEditor edtProjectName;
 
     // ── Tab 1: Process & Train ────────────────────────────────────────────────
     juce::Label        lblFolder;
@@ -68,6 +73,24 @@ private:
     std::unique_ptr<juce::LookAndFeel> smallToggleLAF;
     std::unique_ptr<juce::LookAndFeel> mirrorKnobLAF;
     std::unique_ptr<juce::LookAndFeel> keyButtonLAF;
+    juce::TooltipWindow tooltipWindow { this, 600 };  // 600 ms hover delay
+
+    // Long-press tooltip for touch screens (iPad / trackpad force-press)
+    struct LongPressHelper : public juce::MouseListener, private juce::Timer
+    {
+        explicit LongPressHelper (juce::Component& o) : owner (o) {}
+        void mouseDown (const juce::MouseEvent&) override;
+        void mouseUp   (const juce::MouseEvent&) override;
+        void mouseDrag (const juce::MouseEvent&) override;
+    private:
+        void timerCallback() override;
+        static juce::String findTooltip (juce::Component*);
+        juce::Component&   owner;
+        juce::Component*   pressedOn { nullptr };
+        juce::Point<float> pressPos;
+    };
+    LongPressHelper longPressHelper { *this };
+
     juce::String prevStage;
     bool         prevIsError { false };
     juce::String localErrorMessage;  // client-side errors that survive the server status poll
