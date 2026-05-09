@@ -69,6 +69,7 @@ public:
 
     double getHostBpm() const { return cachedBpm.load(); }
     int    loadCheckpointInfo();
+    int    fetchSeqLenForCkpt (const juce::String& path);  // reads seq_len from any .pt via server
     bool   isTrainingDataReady();
     juce::String getPref (const juce::String& key, const juce::String& fallback = {});
     void         setPref (const juce::String& key, const juce::String& value);

@@ -423,6 +423,11 @@ bool AIMusicProcessor::isTrainingDataReady()
         && eventsDir.getChildFile ("events_val.pkl").existsAsFile();
 }
 
+int AIMusicProcessor::fetchSeqLenForCkpt (const juce::String& path)
+{
+    return client.fetchCheckpointInfo (path);
+}
+
 int AIMusicProcessor::loadCheckpointInfo()
 {
     trainingCtxLen = client.fetchCheckpointInfo (ckptPath);

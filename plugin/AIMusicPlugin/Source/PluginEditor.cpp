@@ -1551,14 +1551,32 @@ struct AdvancedPanel : public juce::Component
             if (candidate.existsAsFile())
                 proc.pretrainCkpt = candidate.getFullPathName();
         }
+        // Lock seq_len to match the base checkpoint; unlock when fine-tune is off
+        auto applyFineTuneLock = [this] {
+            bool on = chkFineTune.getToggleState();
+            proc.pretrainCkpt = on ? edtBaseCkpt.getText().trim() : juce::String{};
+            edtBaseCkpt .setEnabled (on);
+            btnBrowseBase.setEnabled (on);
+            if (on && proc.pretrainCkpt.isNotEmpty())
+            {
+                int ckptSeq = proc.fetchSeqLenForCkpt (proc.pretrainCkpt);
+                if (ckptSeq > 0)
+                {
+                    sldSeqLen.setValue (ckptSeq, juce::sendNotification);
+                    sldSeqLen.setEnabled (false);
+                    sldSeqLen.setTooltip ("Locked to " + juce::String (ckptSeq)
+                                          + " - must match the base checkpoint's training length.");
+                    return;
+                }
+            }
+            sldSeqLen.setEnabled (true);
+            sldSeqLen.setTooltip ("Number of tokens per training window. "
+                                  "512 works well for most datasets; use 1024 for longer musical phrases.");
+        };
+
         chkFineTune.setToggleState (proc.pretrainCkpt.isNotEmpty(), juce::dontSendNotification);
         chkFineTune.setColour (juce::ToggleButton::textColourId, kFg2);
-        chkFineTune.onStateChange = [this] {
-            bool on = chkFineTune.getToggleState();
-            edtBaseCkpt.setEnabled (on);
-            btnBrowseBase.setEnabled (on);
-            proc.pretrainCkpt = on ? edtBaseCkpt.getText().trim() : juce::String{};
-        };
+        chkFineTune.onStateChange = [applyFineTuneLock] { applyFineTuneLock(); };
         addAndMakeVisible (chkFineTune);
 
         styleLabel (lblBaseCkpt);
@@ -1571,11 +1589,13 @@ struct AdvancedPanel : public juce::Component
         edtBaseCkpt.setColour (juce::TextEditor::textColourId,          kFg2);
         edtBaseCkpt.setColour (juce::TextEditor::outlineColourId,       kAcc2.withAlpha (0.35f));
         edtBaseCkpt.setColour (juce::TextEditor::focusedOutlineColourId, kAcc2.withAlpha (0.75f));
-        edtBaseCkpt.onTextChange = [this] {
-            if (chkFineTune.getToggleState())
-                proc.pretrainCkpt = edtBaseCkpt.getText().trim();
+        edtBaseCkpt.onTextChange = [this, applyFineTuneLock] {
+            if (chkFineTune.getToggleState()) applyFineTuneLock();
         };
         addAndMakeVisible (edtBaseCkpt);
+
+        // Apply lock immediately if fine-tune is already on at open time
+        applyFineTuneLock();
 
         btnBrowseBase.setEnabled (proc.pretrainCkpt.isNotEmpty());
         btnBrowseBase.onClick = [this] {
