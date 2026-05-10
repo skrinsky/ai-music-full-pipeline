@@ -1545,6 +1545,7 @@ struct AdvancedPanel : public juce::Component
         // Fine-tune from checkpoint
         styleLabel (lblFineTune);
         // Always default to the Lakh base model — not saved to DAW state so this runs fresh each session
+        proc.discoverRepoRoot();   // ensure repoRoot is populated even if server was already up
         if (proc.repoRoot.exists())
         {
             auto candidate = proc.repoRoot.getChildFile ("runs/checkpoints/es_model.pt");
@@ -1574,7 +1575,7 @@ struct AdvancedPanel : public juce::Component
                                   "512 works well for most datasets; use 1024 for longer musical phrases.");
         };
 
-        chkFineTune.setToggleState (proc.pretrainCkpt.isNotEmpty(), juce::dontSendNotification);
+        chkFineTune.setToggleState (false, juce::dontSendNotification);  // user must opt in
         chkFineTune.setColour (juce::ToggleButton::textColourId, kFg2);
         chkFineTune.onStateChange = [applyFineTuneLock] { applyFineTuneLock(); };
         addAndMakeVisible (chkFineTune);

@@ -183,25 +183,18 @@ juce::PropertiesFile* AIMusicProcessor::getPrefs()
     return appProperties.getUserSettings();
 }
 
-void AIMusicProcessor::launchServer()
+void AIMusicProcessor::discoverRepoRoot()
 {
-    if (client.isServerReachable()) return;
-    lastServerLaunchMs = juce::Time::currentTimeMillis();
+    if (repoRoot.exists()) return;   // already found
 
-    // 0. Compile-time path — always correct for dev builds
 #ifdef AI_REPO_ROOT
     {
         juce::File compiledRoot { juce::String (AI_REPO_ROOT) };
         if (compiledRoot.getChildFile ("plugin/server.py").existsAsFile())
-        {
-            repoRoot = compiledRoot;
-            tryLaunchServerFromRepoRoot (repoRoot);
-            return;
-        }
+        { repoRoot = compiledRoot; return; }
     }
 #endif
 
-    // 1. Try repo root saved from a previous session
     if (auto* prefs = getPrefs())
     {
         auto saved = prefs->getValue ("repoRoot");
@@ -209,23 +202,26 @@ void AIMusicProcessor::launchServer()
         {
             auto root = juce::File (saved);
             if (root.getChildFile ("plugin/server.py").existsAsFile())
-            {
-                repoRoot = root;
-                tryLaunchServerFromRepoRoot (repoRoot);
-                return;
-            }
+            { repoRoot = root; return; }
         }
     }
 
-    // 2. Fall back to walking up from plugin binary (works for dev/build installs)
     auto pluginDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
                          .getParentDirectory();
     auto found = findRepoRoot (pluginDir);
     if (found.exists())
-    {
         repoRoot = found;
+}
+
+void AIMusicProcessor::launchServer()
+{
+    discoverRepoRoot();                       // always populate repoRoot first
+
+    if (client.isServerReachable()) return;   // server already up — nothing to launch
+    lastServerLaunchMs = juce::Time::currentTimeMillis();
+
+    if (repoRoot.exists())
         tryLaunchServerFromRepoRoot (repoRoot);
-    }
 }
 
 void AIMusicProcessor::processBlock (juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi)

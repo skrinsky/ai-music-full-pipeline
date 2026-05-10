@@ -71,6 +71,7 @@ public:
     int    loadCheckpointInfo();
     int    fetchSeqLenForCkpt (const juce::String& path);  // reads seq_len from any .pt via server
     bool   isTrainingDataReady();
+    void   discoverRepoRoot();   // public so editor can call it directly
     juce::String getPref (const juce::String& key, const juce::String& fallback = {});
     void         setPref (const juce::String& key, const juce::String& value);
     juce::String fetchLatestEvents()  { return client.fetchLatestEvents(); }
