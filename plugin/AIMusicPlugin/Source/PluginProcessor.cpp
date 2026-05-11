@@ -361,18 +361,18 @@ void AIMusicProcessor::startProcess (const juce::String& folder,
     client.postProcess (folder, selectedTracks, true, discIntensity, projectName, filesToSkip);
 }
 
-void AIMusicProcessor::startTrain (const juce::String& eventsDir)
+void AIMusicProcessor::startTrain (const juce::String& eventsDir, bool forceRestart)
 {
     // If a project name is set, pass it and let the server derive all paths.
     if (projectName.isNotEmpty())
     {
-        client.postTrain ({}, {}, "auto", 200, seqLen, projectName, pretrainCkpt);
+        client.postTrain ({}, {}, "auto", 200, seqLen, projectName, pretrainCkpt, forceRestart);
         return;
     }
     // Legacy: explicit events dir (e.g. from browseEventsAndTrain)
     if (eventsDir.isNotEmpty())
     {
-        client.postTrain (eventsDir, ckptPath, "auto", 200, seqLen, {}, pretrainCkpt);
+        client.postTrain (eventsDir, ckptPath, "auto", 200, seqLen, {}, pretrainCkpt, forceRestart);
         return;
     }
     auto startDir2 = juce::File (ckptPath.isNotEmpty() ? ckptPath : audioFolder);
@@ -380,7 +380,7 @@ void AIMusicProcessor::startTrain (const juce::String& eventsDir)
     auto dir       = repoRoot2.exists()
                          ? repoRoot2.getChildFile ("runs/events").getFullPathName()
                          : juce::String ("runs/events");
-    client.postTrain (dir, ckptPath, "auto", 200, seqLen, {}, pretrainCkpt);
+    client.postTrain (dir, ckptPath, "auto", 200, seqLen, {}, pretrainCkpt, forceRestart);
 }
 
 void AIMusicProcessor::startGenerate()

@@ -1451,6 +1451,170 @@ struct ReprocessDialog : public juce::Component
 };
 
 
+// ── Resume Training Dialog ────────────────────────────────────────────────────
+struct ResumeTrainingDialog : public juce::Component
+{
+    juce::String projectName;
+    int          epoch { 0 };
+
+    std::function<void()> onContinue, onStartFresh, onCancel;
+
+    bool hoverContinue   { false };
+    bool hoverStartFresh { false };
+    bool hoverCancel     { false };
+
+    ResumeTrainingDialog (const juce::String& name, int ep)
+        : projectName (name), epoch (ep)
+    {
+        setInterceptsMouseClicks (true, false);
+    }
+
+    juce::Rectangle<int> panelBounds() const
+    {
+        int pw = 420, ph = 190;
+        return { (getWidth() - pw) / 2, (getHeight() - ph) / 2, pw, ph };
+    }
+    juce::Rectangle<int> continueBounds() const
+    {
+        auto p = panelBounds();
+        return { p.getRight() - 120, p.getBottom() - 44, 104, 30 };
+    }
+    juce::Rectangle<int> startFreshBounds() const
+    {
+        auto p = panelBounds();
+        return { p.getCentreX() - 52, p.getBottom() - 44, 104, 30 };
+    }
+    juce::Rectangle<int> cancelBounds() const
+    {
+        auto p = panelBounds();
+        return { p.getX() + 16, p.getBottom() - 44, 104, 30 };
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour (0xcc060412));
+
+        auto panel = panelBounds().toFloat();
+        g.setColour (juce::Colour (0xff130a24));
+        g.fillRoundedRectangle (panel, 12.f);
+        g.setColour (juce::Colour (0xff5522bb).withAlpha (0.75f));
+        g.drawRoundedRectangle (panel, 12.f, 1.5f);
+
+        // Title
+        g.setColour (juce::Colour (0xffFFD700));
+        g.setFont (juce::Font (14.f, juce::Font::bold));
+        g.drawText ("RESUME TRAINING?", panelBounds().withHeight (44),
+                    juce::Justification::centred);
+
+        // Divider
+        g.setColour (juce::Colour (0xff5522bb).withAlpha (0.28f));
+        g.drawLine ((float) panelBounds().getX() + 18, (float) panelBounds().getY() + 48,
+                    (float) panelBounds().getRight() - 18, (float) panelBounds().getY() + 48, 1.f);
+
+        // Body
+        juce::String body = "A saved model exists for \"" + projectName + "\"";
+        if (epoch > 0)
+            body += " (epoch " + juce::String (epoch) + ")";
+        body += ".\n\nContinue from the last best checkpoint, or discard it and start fresh?";
+        g.setColour (juce::Colours::white.withAlpha (0.75f));
+        g.setFont (juce::Font (11.f));
+        g.drawFittedText (body,
+                          panelBounds().withTrimmedTop (54).withTrimmedBottom (58)
+                                       .withTrimmedLeft (20).withTrimmedRight (20),
+                          juce::Justification::topLeft, 4, 1.f);
+
+        // Continue button (primary -- purple fill, gold text)
+        {
+            auto cb = continueBounds().toFloat();
+            g.setColour (juce::Colour (0xff5522bb).withAlpha (hoverContinue ? 1.0f : 0.82f));
+            g.fillRoundedRectangle (cb, 6.f);
+            g.setColour (juce::Colour (0xffFFD700).withAlpha (hoverContinue ? 0.9f : 0.6f));
+            g.drawRoundedRectangle (cb, 6.f, 1.f);
+            g.setColour (juce::Colour (0xffFFD700));
+            g.setFont (juce::Font (10.f, juce::Font::bold));
+            g.drawText ("CONTINUE", continueBounds(), juce::Justification::centred);
+        }
+
+        // Start Fresh button (destructive -- dark red tint)
+        {
+            auto sb = startFreshBounds().toFloat();
+            g.setColour (juce::Colour (0xff3a0f0f).withAlpha (hoverStartFresh ? 0.95f : 0.80f));
+            g.fillRoundedRectangle (sb, 6.f);
+            g.setColour (juce::Colour (0xffaa2222).withAlpha (hoverStartFresh ? 0.9f : 0.55f));
+            g.drawRoundedRectangle (sb, 6.f, 1.f);
+            g.setColour (juce::Colour (0xffff9999).withAlpha (hoverStartFresh ? 1.0f : 0.80f));
+            g.setFont (juce::Font (10.f, juce::Font::bold));
+            g.drawText ("START FRESH", startFreshBounds(), juce::Justification::centred);
+        }
+
+        // Cancel button (ghost -- dark fill, purple outline)
+        {
+            auto xb = cancelBounds().toFloat();
+            g.setColour (juce::Colour (0xff1e1040).withAlpha (hoverCancel ? 0.95f : 0.75f));
+            g.fillRoundedRectangle (xb, 6.f);
+            g.setColour (juce::Colour (0xff5522bb).withAlpha (hoverCancel ? 0.8f : 0.45f));
+            g.drawRoundedRectangle (xb, 6.f, 1.f);
+            g.setColour (juce::Colours::white.withAlpha (hoverCancel ? 0.85f : 0.55f));
+            g.setFont (juce::Font (10.f, juce::Font::bold));
+            g.drawText ("CANCEL", cancelBounds(), juce::Justification::centred);
+        }
+    }
+
+    void resized() override {}
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        bool nc = continueBounds().contains   (e.getPosition());
+        bool ns = startFreshBounds().contains (e.getPosition());
+        bool nx = cancelBounds().contains     (e.getPosition());
+        if (nc != hoverContinue || ns != hoverStartFresh || nx != hoverCancel)
+        {
+            hoverContinue = nc; hoverStartFresh = ns; hoverCancel = nx;
+            repaint();
+        }
+    }
+
+    void mouseExit (const juce::MouseEvent&) override
+    {
+        hoverContinue = hoverStartFresh = hoverCancel = false;
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (continueBounds().contains (e.getPosition()))
+        {
+            auto cb = onContinue;
+            dismiss();
+            if (cb) cb();
+            return;
+        }
+        if (startFreshBounds().contains (e.getPosition()))
+        {
+            auto cb = onStartFresh;
+            dismiss();
+            if (cb) cb();
+            return;
+        }
+        if (cancelBounds().contains (e.getPosition()))
+        {
+            auto cb = onCancel;
+            dismiss();
+            if (cb) cb();
+        }
+    }
+
+private:
+    void dismiss()
+    {
+        juce::MessageManager::callAsync ([this] {
+            if (auto* p = getParentComponent()) p->removeChildComponent (this);
+            delete this;
+        });
+    }
+};
+
+
 // ── Advanced Settings Panel ───────────────────────────────────────────────────
 struct AdvancedPanel : public juce::Component
 {
@@ -1552,12 +1716,27 @@ struct AdvancedPanel : public juce::Component
             if (candidate.existsAsFile())
                 proc.pretrainCkpt = candidate.getFullPathName();
         }
-        // Lock seq_len to match the base checkpoint; unlock when fine-tune is off
+        // Lock seq_len to match the base checkpoint; unlock when fine-tune is off.
+        // Also appends / strips "_fine_tune" suffix on the project name.
         auto applyFineTuneLock = [this] {
             bool on = chkFineTune.getToggleState();
             proc.pretrainCkpt = on ? edtBaseCkpt.getText().trim() : juce::String{};
-            edtBaseCkpt .setEnabled (on);
+            edtBaseCkpt  .setEnabled (on);
             btnBrowseBase.setEnabled (on);
+
+            // Project name suffix
+            static const juce::String kSuffix ("_fine_tune");
+            juce::String name = proc.projectName;
+            if (on && ! name.endsWith (kSuffix))
+                name = name + kSuffix;
+            else if (! on && name.endsWith (kSuffix))
+                name = name.dropLastCharacters (kSuffix.length());
+            if (name != proc.projectName)
+            {
+                proc.projectName = name;
+                if (proc.onProjectNameChanged) proc.onProjectNameChanged();
+            }
+
             if (on && proc.pretrainCkpt.isNotEmpty())
             {
                 int ckptSeq = proc.fetchSeqLenForCkpt (proc.pretrainCkpt);
@@ -1744,7 +1923,7 @@ struct AdvancedPanel : public juce::Component
     void paint (juce::Graphics& g) override
     {
         g.fillAll (kBg2);
-        float sepY = (float) getHeight() * 0.40f;
+        float sepY = (float) getHeight() * 0.28f;   // separates seq/fine-tune from filter+preview
         g.setColour (kFg2.withAlpha (0.12f));
         g.drawHorizontalLine ((int) sepY, 12.f, (float) getWidth() - 12.f);
         // piano roll border
@@ -1756,20 +1935,6 @@ struct AdvancedPanel : public juce::Component
     {
         auto area = getLocalBounds().reduced (14, 12);
         int rowH  = 22, gap = 4;
-
-        // ── Note Filter ───────────────────────────────────────────────────────
-        auto discRow = area.removeFromTop (rowH);
-        lblDisc .setBounds (discRow.removeFromLeft (90));
-        chkDisc .setBounds (discRow.removeFromLeft (70));
-        area.removeFromTop (gap);
-        auto intRow = area.removeFromTop (rowH);
-        lblIntensity.setBounds (intRow.removeFromLeft (68));
-        intRow.removeFromLeft (4);
-        sldIntensity.setBounds (intRow);
-        area.removeFromTop (2);
-        lblIntensityHint.setBounds (area.removeFromTop (14));
-
-        area.removeFromTop (10);
 
         // ── Seq Length ────────────────────────────────────────────────────────
         lblSeq.setBounds (area.removeFromTop (rowH));
@@ -1792,7 +1957,21 @@ struct AdvancedPanel : public juce::Component
         baseRow.removeFromRight (4);
         edtBaseCkpt  .setBounds (baseRow);
 
-        area.removeFromTop (12);
+        area.removeFromTop (14);
+
+        // ── Note Filter (sits directly above its preview) ─────────────────────
+        auto discRow = area.removeFromTop (rowH);
+        lblDisc .setBounds (discRow.removeFromLeft (90));
+        chkDisc .setBounds (discRow.removeFromLeft (70));
+        area.removeFromTop (gap);
+        auto intRow = area.removeFromTop (rowH);
+        lblIntensity.setBounds (intRow.removeFromLeft (68));
+        intRow.removeFromLeft (4);
+        sldIntensity.setBounds (intRow);
+        area.removeFromTop (2);
+        lblIntensityHint.setBounds (area.removeFromTop (14));
+
+        area.removeFromTop (8);
 
         // ── Preview header ────────────────────────────────────────────────────
         auto hdr = area.removeFromTop (rowH);
@@ -2010,7 +2189,8 @@ AIMusicEditor::AIMusicEditor (AIMusicProcessor& p)
     addAndMakeVisible (btnSavePreset);
     addAndMakeVisible (btnLoadPreset);
 
-    proc.onStateLoaded = [this] { refreshFromProcessor(); };
+    proc.onStateLoaded        = [this] { refreshFromProcessor(); };
+    proc.onProjectNameChanged = [this] { edtProjectName.setText (proc.projectName, false); };
 
     // ── Shared ────────────────────────────────────────────────────────────────
     btnCancel.onClick = [this] { localErrorMessage.clear(); proc.cancelJob(); };
@@ -2178,6 +2358,7 @@ AIMusicEditor::~AIMusicEditor()
 {
     stopTimer();
     proc.onStateLoaded          = nullptr;
+    proc.onProjectNameChanged   = nullptr;
     proc.onPreviewStateChanged  = nullptr;
     proc.stopPreview();
     setLookAndFeel (nullptr);    // must clear before LAF is destroyed
@@ -2691,9 +2872,13 @@ void AIMusicEditor::updateStatusLabel()
                 ""
 #endif
             );
-            if (repoRoot.isNotEmpty())
             {
-                lastMidiPath = repoRoot + "/runs/generated/plugin/" + jobId + "/generated.mid";
+                // Prefer the exact path the server reported; fall back to legacy location.
+                if (proc.lastStatus.midiPath.isNotEmpty())
+                    lastMidiPath = proc.lastStatus.midiPath;
+                else if (repoRoot.isNotEmpty())
+                    lastMidiPath = repoRoot + "/runs/generated/plugin/" + jobId + "/generated.mid";
+
                 bool midiReady = juce::File (lastMidiPath).existsAsFile();
                 btnShowMidi.setVisible (midiReady);
                 btnPreview  .setVisible (midiReady);
@@ -2800,31 +2985,59 @@ void AIMusicEditor::browseCheckpoint()
 
 void AIMusicEditor::browseEventsAndTrain()
 {
-    // Default to the most recently created events folder; fall back to runs/events/
-    auto latest   = proc.fetchLatestEvents();
-    auto startDir = latest.isNotEmpty()
-                        ? juce::File (latest)
-                        : juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+    // Check whether a checkpoint already exists for this project.
+    auto [ckptExists, ckptEpoch] = proc.fetchCheckpointStatus();
 
-    auto chooser = std::make_shared<juce::FileChooser> (
-        "Select events folder to train on", startDir);
-
-    chooser->launchAsync (juce::FileBrowserComponent::openMode |
-                          juce::FileBrowserComponent::canSelectDirectories,
-        [this, chooser] (const juce::FileChooser& fc)
+    auto doTrain = [this, ckptExists, ckptEpoch] (bool forceRestart)
+    {
+        // Project-name path: server derives all paths itself, no folder chooser needed.
+        if (proc.projectName.isNotEmpty())
         {
-            auto folder = fc.getResult();
-            if (! folder.isDirectory()) return;
+            proc.startTrain ({}, forceRestart);
+            return;
+        }
 
-            if (! folder.getChildFile ("events_train.pkl").existsAsFile())
+        // Legacy path: ask user to pick the events folder.
+        auto latest   = proc.fetchLatestEvents();
+        auto startDir = latest.isNotEmpty()
+                            ? juce::File (latest)
+                            : juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+
+        auto chooser = std::make_shared<juce::FileChooser> (
+            "Select events folder to train on", startDir);
+
+        chooser->launchAsync (juce::FileBrowserComponent::openMode |
+                              juce::FileBrowserComponent::canSelectDirectories,
+            [this, chooser, forceRestart] (const juce::FileChooser& fc)
             {
-                localErrorMessage = "Selected folder has no events_train.pkl -run Process Audio first.";
-                updateStatusLabel();
-                return;
-            }
-            localErrorMessage.clear();
-            proc.startTrain (folder.getFullPathName());
-        });
+                auto folder = fc.getResult();
+                if (! folder.isDirectory()) return;
+
+                if (! folder.getChildFile ("events_train.pkl").existsAsFile())
+                {
+                    localErrorMessage = "Selected folder has no events_train.pkl - run Process Audio first.";
+                    updateStatusLabel();
+                    return;
+                }
+                localErrorMessage.clear();
+                proc.startTrain (folder.getFullPathName(), forceRestart);
+            });
+    };
+
+    if (ckptExists)
+    {
+        auto* dlg = new ResumeTrainingDialog (proc.projectName, ckptEpoch);
+        dlg->setBounds (getLocalBounds());
+        dlg->onContinue   = [doTrain] { doTrain (false); };
+        dlg->onStartFresh = [doTrain] { doTrain (true); };
+        dlg->onCancel     = [] {};
+        addAndMakeVisible (dlg);
+        dlg->toFront (false);
+    }
+    else
+    {
+        doTrain (false);
+    }
 }
 
 void AIMusicEditor::savePreset()

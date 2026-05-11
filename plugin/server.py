@@ -61,6 +61,7 @@ _status: dict = {
     "events_dir": None,    # path to preprocessed events folder after processing
     "ckpt_path":  None,    # path to checkpoint written when training completes
     "daw_insert": None,    # 'reaper' | 'ableton' | '*_error' | 'unsupported' | None
+    "midi_path":  None,    # absolute path to generated MIDI when generation completes
 }
 
 # generated MIDI files keyed by job_id
@@ -69,6 +70,13 @@ _midi_files: dict[str, Path] = {}
 # currently running subprocess (so /cancel can kill it)
 _current_proc: Optional[subprocess.Popen] = None
 _cancelled = threading.Event()
+_watchdog_restart = threading.Event()  # set by watchdog to request a restart
+
+# Epoch timing — updated by _parse_train_line, read by watchdog
+_epoch_start_ts:      float = 0.0   # wall time when current epoch's first batch fired
+_last_epoch_duration: float = 0.0   # seconds the previous epoch took (0 = unknown)
+_last_batch_ts:       float = 0.0   # wall time of last BATCH_PROGRESS line
+_last_batch_val:      float = -1.0  # last batch_progress fraction seen
 
 
 def _set_status(**kwargs):
@@ -77,8 +85,9 @@ def _set_status(**kwargs):
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _run_streaming(cmd: list[str], cwd: Path, parse_fn=None):
+def _run_streaming(cmd: list[str], cwd: Path, parse_fn=None, on_start=None):
     """Run a subprocess, stream stdout, optionally parse each line.
+    on_start(proc) is called immediately after the process launches (before blocking).
     Returns (returncode, last_lines) where last_lines is the tail of output."""
     global _current_proc
     proc = subprocess.Popen(
@@ -89,6 +98,8 @@ def _run_streaming(cmd: list[str], cwd: Path, parse_fn=None):
         cwd=str(cwd),
     )
     _current_proc = proc
+    if on_start:
+        on_start(proc)
     tail: list[str] = []
 
     def _read():
@@ -106,10 +117,28 @@ def _run_streaming(cmd: list[str], cwd: Path, parse_fn=None):
 
     reader = threading.Thread(target=_read, daemon=True)
     reader.start()
-    proc.wait()                # returns as soon as the main process exits
+    # Poll instead of blocking proc.wait() — if the process is stuck inside a
+    # GPU driver (MPS/Metal deadlock) SIGKILL may never be delivered, and a
+    # bare wait() would block forever.  Once a kill has been requested
+    # (_watchdog_restart or _cancelled) give the process KILL_GRACE seconds to
+    # exit on its own, then break out so the restart loop can continue.
+    KILL_GRACE = 60.0
+    kill_deadline: float = 0.0
+    while True:
+        try:
+            proc.wait(timeout=1.0)
+            break  # process exited normally
+        except subprocess.TimeoutExpired:
+            pass
+        if _watchdog_restart.is_set() or _cancelled.is_set():
+            if kill_deadline == 0.0:
+                kill_deadline = time.time() + KILL_GRACE
+            elif time.time() > kill_deadline:
+                print("[server] process survived SIGKILL (Metal/GPU deadlock) -- forcing unblock for restart", flush=True)
+                break
     reader.join(timeout=5.0)  # drain remaining output; don't hang if torch workers hold the pipe
     _current_proc = None
-    return proc.returncode, tail
+    return proc.poll() if proc.poll() is not None else -1, tail
 
 
 _EPOCH_RE = re.compile(
@@ -120,15 +149,28 @@ _PREPROCESS_RE = re.compile(r"^PREPROCESS\s+(\d+)/(\d+)$")
 
 
 def _parse_train_line(line: str):
+    global _epoch_start_ts, _last_epoch_duration, _last_batch_ts, _last_batch_val
     m = _EPOCH_RE.search(line)
     if m:
+        now = time.time()
+        if _epoch_start_ts > 0:
+            _last_epoch_duration = now - _epoch_start_ts
+        _epoch_start_ts = now          # reset for next epoch
+        _last_batch_ts  = now          # epoch completion counts as progress
         _set_status(epoch=int(m.group(1)), val_loss=float(m.group(2)),
                     batch_progress=0.0)
         return
     m2 = _BATCH_RE.match(line)
     if m2:
         done, total = int(m2.group(1)), int(m2.group(2))
-        _set_status(batch_progress=done / total if total > 0 else 0.0)
+        frac = done / total if total > 0 else 0.0
+        now  = time.time()
+        if frac != _last_batch_val:    # only count actual movement
+            _last_batch_ts  = now
+            _last_batch_val = frac
+            if _epoch_start_ts == 0:   # first batch ever — mark epoch start
+                _epoch_start_ts = now
+        _set_status(batch_progress=frac)
 
 
 def _parse_preprocess_line(line: str):
@@ -158,6 +200,7 @@ class TrainRequest(BaseModel):
     seq_len: int = 512
     project_name: str = ""        # if set, overrides events_dir and ckpt_path
     pretrain_ckpt: str = ""       # if set, resume/fine-tune from this checkpoint
+    force_restart: bool = False   # if True, ignore existing checkpoint and train from scratch
 
 
 class GenerateRequest(BaseModel):
@@ -179,6 +222,25 @@ class GenerateRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/checkpoint_status")
+def checkpoint_status(project_name: str = ""):
+    """Return whether a checkpoint exists for a project and which epoch it's from."""
+    import torch
+    if project_name.strip():
+        project_slug = re.sub(r"[^\w-]", "_", project_name.strip()) or "default"
+        ckpt_path = ROOT / "runs" / project_slug / "checkpoints" / "model.pt"
+    else:
+        ckpt_path = ROOT / "runs" / "checkpoints" / "es_model.pt"
+    if not ckpt_path.exists():
+        return {"exists": False, "epoch": None}
+    try:
+        data = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+        epoch = int(data.get("epoch", -1))
+    except Exception:
+        epoch = -1
+    return {"exists": True, "epoch": epoch}
 
 
 @app.get("/checkpoint_info")
@@ -432,6 +494,7 @@ def train(req: TrainRequest):
         raise HTTPException(409, "Another job is already running")
 
     def run():
+        global _epoch_start_ts, _last_epoch_duration, _last_batch_ts, _last_batch_val
         try:
             if req.project_name.strip():
                 project_slug = re.sub(r"[^\w-]", "_", req.project_name.strip()) or "default"
@@ -443,32 +506,88 @@ def train(req: TrainRequest):
                 events_dir = str((ROOT / req.events_dir).resolve())
                 ckpt_path  = str((ROOT / req.ckpt_path).resolve())
 
-            _set_status(stage="training", message="training started",
-                        error=None, epoch=0, total_epochs=req.epochs,
-                        train_loss=None, val_loss=None)
+            while True:   # restart loop — re-enters on watchdog kill
+                # Reset timing state for fresh epoch measurement each run
+                _epoch_start_ts = _last_batch_ts = 0.0
+                _last_epoch_duration = _last_batch_val = 0.0
+                _watchdog_restart.clear()
 
-            cmd = [
-                PYTHON, str(ROOT / "training" / "train.py"),
-                "--data_dir",   events_dir,
-                "--train_pkl",  str(Path(events_dir) / "events_train.pkl"),
-                "--val_pkl",    str(Path(events_dir) / "events_val.pkl"),
-                "--vocab_json", str(Path(events_dir) / "event_vocab.json"),
-                "--save_path",  ckpt_path,
-                "--device",     req.device,
-                "--seq_len",    str(req.seq_len),
-            ]
-            if req.pretrain_ckpt:
-                cmd += ["--resume", req.pretrain_ckpt]
-                print(f"[train] fine-tuning from: {req.pretrain_ckpt}", flush=True)
+                _set_status(stage="training", message="training started",
+                            error=None, epoch=0, total_epochs=req.epochs,
+                            train_loss=None, val_loss=None)
 
-            rc, tail = _run_streaming(cmd, cwd=ROOT, parse_fn=_parse_train_line)
-            if rc != 0:
-                if not _cancelled.is_set():
-                    _set_status(stage="error", error="training failed: " + " | ".join(tail[-3:]))
+                cmd = [
+                    PYTHON, str(ROOT / "training" / "train.py"),
+                    "--data_dir",   events_dir,
+                    "--train_pkl",  str(Path(events_dir) / "events_train.pkl"),
+                    "--val_pkl",    str(Path(events_dir) / "events_val.pkl"),
+                    "--vocab_json", str(Path(events_dir) / "event_vocab.json"),
+                    "--save_path",  ckpt_path,
+                    "--device",     req.device,
+                    "--seq_len",    str(req.seq_len),
+                ]
+
+                # Auto-resume: continue from existing checkpoint unless force_restart requested.
+                # Fine-tune base checkpoint takes priority; otherwise use the project checkpoint.
+                if req.force_restart:
+                    resume_from = ""
+                    cmd += ["--reset_best_val"]
+                    print("[train] force_restart=True -- training from scratch", flush=True)
+                else:
+                    resume_from = req.pretrain_ckpt or (ckpt_path if Path(ckpt_path).exists() else "")
+                if resume_from:
+                    cmd += ["--resume", resume_from]
+                    label = "fine-tuning from" if req.pretrain_ckpt else "resuming from"
+                    print(f"[train] {label}: {resume_from}", flush=True)
+
+                # Watchdog: kills subprocess if batch_progress stalls for > 3x epoch duration
+                def _watchdog(proc_ref):
+                    global _last_batch_ts
+                    POLL = 15          # check every 15 s
+                    FALLBACK = 1800.0  # 30 min before we know epoch duration
+                    last_poll_ts = time.time()
+                    while not _cancelled.is_set():
+                        time.sleep(POLL)
+                        now = time.time()
+                        # If wall time jumped >> POLL the system was asleep.
+                        # Reset the stall timer so we don't treat sleep time as a training stall.
+                        if now - last_poll_ts > POLL * 3:
+                            gap = int(now - last_poll_ts)
+                            print(f"[watchdog] system sleep detected ({gap}s gap) -- resetting stall timer", flush=True)
+                            _last_batch_ts = now
+                        last_poll_ts = now
+                        if proc_ref.poll() is not None:
+                            break
+                        if _last_batch_ts == 0:
+                            continue
+                        timeout = (3.0 * _last_epoch_duration
+                                   if _last_epoch_duration > 0 else FALLBACK)
+                        elapsed = time.time() - _last_batch_ts
+                        if elapsed > timeout:
+                            mins     = int(elapsed / 60)
+                            dur_mins = round(_last_epoch_duration / 60, 1) if _last_epoch_duration > 0 else "?"
+                            print(f"[watchdog] stall {mins}m (epoch ~{dur_mins}m) -- killing", flush=True)
+                            _set_status(message=f"Stall detected ({mins} min) -- restarting...")
+                            _watchdog_restart.set()
+                            proc_ref.kill()
+                            break
+
+                rc, tail = _run_streaming(cmd, cwd=ROOT, parse_fn=_parse_train_line,
+                                          on_start=lambda p: threading.Thread(
+                                              target=_watchdog, args=(p,), daemon=True).start())
+
+                if _watchdog_restart.is_set() and not _cancelled.is_set():
+                    time.sleep(2)   # brief pause before restarting
+                    continue        # loop back — will auto-resume from checkpoint
+
+                if rc != 0:
+                    if not _cancelled.is_set():
+                        _set_status(stage="error", error="training failed: " + " | ".join(tail[-3:]))
+                    return
+
+                _set_status(stage="done", message="training complete", ckpt_path=ckpt_path)
                 return
 
-            _set_status(stage="done", message="training complete",
-                        ckpt_path=ckpt_path)
         finally:
             _cancelled.clear()
             _job_lock.release()
@@ -497,12 +616,24 @@ def generate(req: GenerateRequest):
 
             # Resolve vocab_json: use supplied path if it exists, otherwise
             # search every known event directory under ROOT.
-            _EVENT_DIRS = [
-                "runs/events", "runs/retrain_events", "runs/blues_events",
-                "runs/chorale_events", "runs/chorale_dense_events",
-                "runs/cascade_events_a", "runs/cascade_events_b",
-                "runs/chorale_cascade_events",
-            ]
+            # Project-specific dir goes first (most likely match); then a glob
+            # sweep picks up any other project dirs; legacy fixed paths follow.
+            _proj_events = (
+                [f"runs/{_proj_slug}/events"] if req.project_name.strip() else []
+            )
+            _glob_events = sorted(
+                str(p.relative_to(ROOT))
+                for p in ROOT.glob("runs/*/events")
+                if p.is_dir()
+            )
+            _EVENT_DIRS = list(dict.fromkeys(
+                _proj_events + _glob_events + [
+                    "runs/events", "runs/retrain_events", "runs/blues_events",
+                    "runs/chorale_events", "runs/chorale_dense_events",
+                    "runs/cascade_events_a", "runs/cascade_events_b",
+                    "runs/chorale_cascade_events",
+                ]
+            ))
             vocab_path: Optional[Path] = None
             if req.vocab_json:
                 p = Path(req.vocab_json).resolve()
@@ -566,7 +697,7 @@ def generate(req: GenerateRequest):
                 "--force_grid_step",   str(req.grid_straight_step),
                 "--grid_triplet_step", str(req.grid_triplet_step),
                 "--max_tokens",      str(req.max_tokens),
-                "--device",          "auto",
+                "--device",          "cuda" if torch.cuda.is_available() else "cpu",
             ]
             if seed_pkl:
                 cmd += ["--seed_pkl", str(Path(seed_pkl).resolve())]
@@ -591,7 +722,7 @@ def generate(req: GenerateRequest):
                 daw_result = "insert_error"
 
             _set_status(stage="done", message=f"midi_id={job_id}",
-                        daw_insert=daw_result)
+                        daw_insert=daw_result, midi_path=str(out_mid))
         except Exception as e:
             if not _cancelled.is_set():
                 _set_status(stage="error", error=str(e))

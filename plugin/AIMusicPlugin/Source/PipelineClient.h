@@ -12,6 +12,7 @@ struct PipelineStatus
     float  batchProgress = -1.f; // 0–1 within current training epoch
     juce::String error;
     juce::String ckptPath;   // filled when training completes (project-derived path)
+    juce::String midiPath;   // filled when generation completes (absolute path to .mid)
 };
 
 // Thin HTTP client that talks to plugin/server.py on localhost:7437
@@ -40,7 +41,11 @@ public:
                       int                 epochs       = 200,
                       int                 seqLen       = 512,
                       const juce::String& projectName  = {},
-                      const juce::String& pretrainCkpt = {});
+                      const juce::String& pretrainCkpt = {},
+                      bool                forceRestart = false);
+
+    // Returns {exists, epoch} for a project's checkpoint (-1 epoch = unknown)
+    std::pair<bool, int> fetchCheckpointStatus (const juce::String& projectName = {});
 
     // Returns job_id on success, empty string on failure
     juce::String postGenerate (const juce::String& ckpt,

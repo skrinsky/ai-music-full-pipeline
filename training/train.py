@@ -493,8 +493,9 @@ def main():
     ap.add_argument("--target_tpp", type=float, default=8.0, help="Target tokens-per-parameter for auto_scale (7–10 is a good range).")
     ap.add_argument("--max_d_model", type=int, default=256, help="Max d_model considered by auto_scale.")
     ap.add_argument("--min_params", type=int, default=100000, help="Minimum parameter budget when auto_scale is enabled.")
-    ap.add_argument("--patience", type=int, default=25, help="Early stop if val loss does not improve for this many epochs (0 disables).")
+    ap.add_argument("--patience", type=int, default=10, help="Early stop if val loss does not improve for this many epochs (0 disables).")
     ap.add_argument("--min_delta", type=float, default=1e-4, help="Minimum val-loss improvement to count as improvement (for patience reset).")
+    ap.add_argument("--reset_best_val", action="store_true", help="Ignore any existing checkpoint's val loss when deciding whether to save (used with force_restart).")
     ap.add_argument("--d_model", type=int, default=None, help="Manual override d_model (disables auto_scale if set).")
     ap.add_argument("--n_layers", type=int, default=None, help="Manual override number of Transformer layers (disables auto_scale if set).")
     ap.add_argument("--n_heads", type=int, default=None, help="Manual override attention heads (disables auto_scale if set).")
@@ -676,6 +677,17 @@ def main():
     best_val = float('inf'); best_epoch = -1
     epochs_no_improve = 0
     start_epoch = 1
+
+    # ── checkpoint guard: when starting fresh, don't clobber a better existing checkpoint ──
+    if not args.resume and not args.reset_best_val and os.path.isfile(args.save_path):
+        try:
+            _existing = torch.load(args.save_path, map_location="cpu", weights_only=False)
+            _floor = _existing.get("best_val", float('inf'))
+            if _floor < float('inf'):
+                best_val = _floor
+                print(f"[guard] existing checkpoint has best_val={best_val:.4f} -- new training must beat this to save")
+        except Exception:
+            pass  # corrupted or unreadable — start with inf, let training proceed
 
     # ── resume from checkpoint ─────────────────────────────────
     if args.resume:

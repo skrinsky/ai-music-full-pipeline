@@ -53,6 +53,7 @@ PipelineStatus PipelineClient::getStatus()
         s.message  = obj->getProperty ("message").toString();
         s.error    = obj->getProperty ("error").toString();
         s.ckptPath = obj->getProperty ("ckpt_path").toString();
+        s.midiPath = obj->getProperty ("midi_path").toString();
         auto ep   = obj->getProperty ("epoch");
         auto vl   = obj->getProperty ("val_loss");
         auto te   = obj->getProperty ("total_epochs");
@@ -109,18 +110,31 @@ bool PipelineClient::postTrain (const juce::String& eventsDir,
                                 int epochs,
                                 int seqLen,
                                 const juce::String& projectName,
-                                const juce::String& pretrainCkpt)
+                                const juce::String& pretrainCkpt,
+                                bool forceRestart)
 {
     auto* obj = new juce::DynamicObject();
-    obj->setProperty ("events_dir",    eventsDir);
-    obj->setProperty ("ckpt_path",     ckptPath);
-    obj->setProperty ("device",        device);
-    obj->setProperty ("epochs",        epochs);
-    obj->setProperty ("seq_len",       seqLen);
-    obj->setProperty ("project_name",  projectName);
-    obj->setProperty ("pretrain_ckpt", pretrainCkpt);
+    obj->setProperty ("events_dir",     eventsDir);
+    obj->setProperty ("ckpt_path",      ckptPath);
+    obj->setProperty ("device",         device);
+    obj->setProperty ("epochs",         epochs);
+    obj->setProperty ("seq_len",        seqLen);
+    obj->setProperty ("project_name",   projectName);
+    obj->setProperty ("pretrain_ckpt",  pretrainCkpt);
+    obj->setProperty ("force_restart",  forceRestart);
     auto resp = post ("/train", juce::JSON::toString (juce::var (obj)));
     return resp.contains ("started");
+}
+
+std::pair<bool, int> PipelineClient::fetchCheckpointStatus (const juce::String& projectName)
+{
+    auto encoded = juce::URL::addEscapeChars (projectName, true);
+    auto resp = get ("/checkpoint_status?project_name=" + encoded);
+    if (resp.isEmpty()) return {false, -1};
+    auto parsed = juce::JSON::parse (resp);
+    bool exists = parsed.getProperty ("exists", false);
+    int  epoch  = (int) parsed.getProperty ("epoch", -1);
+    return {exists, epoch};
 }
 
 juce::String PipelineClient::postGenerate (const juce::String& ckpt,

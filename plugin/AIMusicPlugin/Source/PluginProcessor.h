@@ -34,7 +34,7 @@ public:
     // Pipeline control — called from editor
     void startProcess (const juce::String& audioFolder,
                        const juce::StringArray& filesToSkip = {});
-    void startTrain (const juce::String& eventsDir = {});
+    void startTrain (const juce::String& eventsDir = {}, bool forceRestart = false);
     void startGenerate();
     void cancelJob();
 
@@ -77,6 +77,8 @@ public:
     juce::String fetchLatestEvents()  { return client.fetchLatestEvents(); }
     juce::String fetchDiscPreview (const juce::String& eventsDir = {})
                                    { return client.fetchDiscPreview (eventsDir); }
+    std::pair<bool, int> fetchCheckpointStatus()
+                                   { return client.fetchCheckpointStatus (projectName); }
 
     // MIDI to send out on next processBlock call (filled from background thread)
     juce::MidiBuffer pendingMidi;
@@ -91,7 +93,8 @@ public:
     bool isPreviewPlaying() const { return previewActive.load(); }
 
     std::function<void()> onStatusChanged;
-    std::function<void()> onStateLoaded;   // editor refreshes UI after DAW session restore
+    std::function<void()> onStateLoaded;          // editor refreshes UI after DAW session restore
+    std::function<void()> onProjectNameChanged;   // editor refreshes project name field
     std::function<void(bool)> onPreviewStateChanged; // called on message thread: true=started, false=stopped
 
 private:
