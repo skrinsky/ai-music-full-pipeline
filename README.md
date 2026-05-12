@@ -19,18 +19,28 @@ Everything runs **locally** on your machine. The plugin talks to a small Python 
 
 ## Download & Install
 
-### Quick install (no Xcode required)
+### Quick install (no Xcode / Visual Studio required)
 
 Downloads the pre-built plugin from GitHub Releases and sets up the Python environment. Just needs git and Python 3.10.
 
+**macOS / Linux:**
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/skrinsky/mirror-mirror/main/install.sh)
 ```
 
 Custom install location:
-
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/skrinsky/mirror-mirror/main/install.sh) --dir ~/my-mirror-mirror
+```
+
+**Windows** (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/skrinsky/mirror-mirror/main/install.ps1 | iex
+```
+
+Custom install location:
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/skrinsky/mirror-mirror/main/install.ps1))) -InstallDir "C:\mirror-mirror"
 ```
 
 ### Build from source
