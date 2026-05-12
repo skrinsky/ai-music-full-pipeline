@@ -3,7 +3,12 @@ project(AIMusicPlugin VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 
-add_subdirectory($ENV{HOME}/JUCE juce_build)
+if(WIN32)
+    set(JUCE_DIR "$ENV{USERPROFILE}/JUCE")
+else()
+    set(JUCE_DIR "$ENV{HOME}/JUCE")
+endif()
+add_subdirectory(${JUCE_DIR} juce_build)
 
 # AU is macOS-only; VST3 is cross-platform
 if(APPLE)
@@ -67,7 +72,7 @@ else()  # Linux
     set(USER_VST3_DIR "$ENV{HOME}/.vst3")
 endif()
 
-set(BUILD_VST3 "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/Debug/VST3/Mirror Mirror.vst3")
+set(BUILD_VST3 "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/$<CONFIG>/VST3/Mirror Mirror.vst3")
 
 add_custom_command(TARGET AIMusicPlugin_VST3 POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E remove_directory "${USER_VST3_DIR}/Mirror Mirror.vst3"
@@ -78,7 +83,7 @@ add_custom_command(TARGET AIMusicPlugin_VST3 POST_BUILD
 
 # AU: macOS only — patch Info.plist, re-sign, install to user Library
 if(APPLE)
-    set(BUILD_COMPONENT "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/Debug/AU/Mirror Mirror.component")
+    set(BUILD_COMPONENT "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/$<CONFIG>/AU/Mirror Mirror.component")
     set(USER_COMPONENT_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/Components/Mirror Mirror.component")
 
     add_custom_command(TARGET AIMusicPlugin_AU POST_BUILD
