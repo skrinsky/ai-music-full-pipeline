@@ -40,7 +40,9 @@ ROOT: Path = Path(__file__).parent.parent.resolve()
 
 # Prefer the repo's own venv so subprocesses (generate.py, train.py, pre.py)
 # get the right packages regardless of which Python launched this server.
-_venv_python = ROOT / ".venv-ai-music" / "bin" / "python"
+_venv_scripts = "Scripts" if sys.platform == "win32" else "bin"
+_venv_exe     = "python.exe" if sys.platform == "win32" else "python"
+_venv_python  = ROOT / ".venv-ai-music" / _venv_scripts / _venv_exe
 PYTHON = str(_venv_python) if _venv_python.exists() else sys.executable
 
 app = FastAPI(title="AI Music Pipeline Server")
@@ -770,14 +772,25 @@ def get_preview(job_id: str, fs: int = 44100, bpm: float = 0.0):
 
 def _find_sf2() -> "str | None":
     """Return path to a GM SoundFont, or None."""
-    candidates = [
-        os.path.expanduser("~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2"),
-        "/usr/share/sounds/sf2/FluidR3_GM.sf2",
-        "/usr/local/share/soundfonts/default.sf2",
-        "/usr/share/soundfonts/default.sf2",
-        "C:/soundfonts/default.sf2",
-        "C:/Program Files/Music/soundfonts/default.sf2",
-    ]
+    if sys.platform == "win32":
+        candidates = [
+            os.path.expanduser("~/soundfonts/FluidR3_GM.sf2"),
+            "C:/soundfonts/FluidR3_GM.sf2",
+            "C:/soundfonts/default.sf2",
+            "C:/Program Files/Music/soundfonts/FluidR3_GM.sf2",
+            "C:/Program Files/Music/soundfonts/default.sf2",
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            os.path.expanduser("~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2"),
+        ]
+    else:
+        candidates = [
+            "/usr/share/sounds/sf2/FluidR3_GM.sf2",
+            "/usr/local/share/soundfonts/FluidR3_GM.sf2",
+            "/usr/local/share/soundfonts/default.sf2",
+            "/usr/share/soundfonts/default.sf2",
+        ]
     return next((p for p in candidates if os.path.isfile(p)), None)
 
 
@@ -808,6 +821,7 @@ def _render_preview_wav(midi_path: "Path", wav_path: "Path", fs: int,
             try:
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     tmp_path = tmp.name
+                # file must be closed before fluidsynth opens it (required on Windows)
                 subprocess.run(
                     ["fluidsynth", "-ni", "-F", tmp_path,
                      "-r", str(fs), sf2, str(midi_path)],

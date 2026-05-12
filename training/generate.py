@@ -68,12 +68,25 @@ def set_gm_programs(midi_path: str):
         pm.write(midi_path)
 
 
-# Default SoundFont search order
-_SF2_SEARCH = [
-    os.path.expanduser("~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2"),
-    "/usr/share/sounds/sf2/FluidR3_GM.sf2",
-    "/usr/local/share/soundfonts/default.sf2",
-]
+# Default SoundFont search order (platform-aware)
+if sys.platform == "win32":
+    _SF2_SEARCH = [
+        os.path.expanduser("~/soundfonts/FluidR3_GM.sf2"),
+        "C:/soundfonts/FluidR3_GM.sf2",
+        "C:/soundfonts/default.sf2",
+        "C:/Program Files/Music/soundfonts/FluidR3_GM.sf2",
+    ]
+elif sys.platform == "darwin":
+    _SF2_SEARCH = [
+        os.path.expanduser("~/Library/Audio/Sounds/Banks/FluidR3_GM.sf2"),
+    ]
+else:
+    _SF2_SEARCH = [
+        "/usr/share/sounds/sf2/FluidR3_GM.sf2",
+        "/usr/local/share/soundfonts/FluidR3_GM.sf2",
+        "/usr/local/share/soundfonts/default.sf2",
+        "/usr/share/soundfonts/default.sf2",
+    ]
 
 def find_soundfont() -> str | None:
     for p in _SF2_SEARCH:
