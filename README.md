@@ -17,11 +17,23 @@ Everything runs **locally** on your machine. The plugin talks to a small Python 
 
 ---
 
-## Download
+## Download & Install
 
-Pre-built VST3 (Windows/Linux/macOS) and AU (macOS) are available on the [Releases page](../../releases). Download the zip for your format, unzip, and drop it in your DAW's plugin folder.
+**One-line installer** (macOS/Linux) — clones the repo, installs dependencies, builds and installs the plugin automatically:
 
-To build from source instead, see [Installation](#installation) below.
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/skrinsky/mirror-mirror/main/install.sh)
+```
+
+Or with a custom install location:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/skrinsky/mirror-mirror/main/install.sh) --dir ~/my-mirror-mirror
+```
+
+Pre-built VST3/AU zips (if you prefer not to build) are on the [Releases page](../../releases).
+
+To build from source manually, see [Installation](#installation) below.
 
 ---
 
