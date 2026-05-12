@@ -247,7 +247,7 @@ Sends everything to the server and starts generation. When done, the **Show MIDI
 - Nodding -> job started
 - Shaking -> error
 - Winking + particle burst -> generation complete
-- O-shaped mouth (pulsing) -> error active; follows your cursor with its eyes
+- Mouth says NO -> error active; follows your cursor with its eyes
 
 ---
 
