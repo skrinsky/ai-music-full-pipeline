@@ -5,11 +5,18 @@ set(CMAKE_CXX_STANDARD 17)
 
 add_subdirectory($ENV{HOME}/JUCE juce_build)
 
+# AU is macOS-only; VST3 is cross-platform
+if(APPLE)
+    set(PLUGIN_FORMATS VST3 AU)
+else()
+    set(PLUGIN_FORMATS VST3)
+endif()
+
 juce_add_plugin(AIMusicPlugin
     COMPANY_NAME            "SummerKrinsky"
     PLUGIN_MANUFACTURER_CODE Smkr
     PLUGIN_CODE             Aimp
-    FORMATS                 VST3 AU
+    FORMATS                 ${PLUGIN_FORMATS}
     PRODUCT_NAME            "Mirror Mirror"
     IS_SYNTH                TRUE
     NEEDS_MIDI_INPUT        FALSE
@@ -51,35 +58,41 @@ target_link_libraries(AIMusicPlugin PRIVATE
     juce::juce_recommended_warning_flags
 )
 
-# Post-build: patch Info.plist to replace resourceUsage with sandboxSafe,
-# then remove the old copy and re-sign
-set(COMPONENT_DIR "/Library/Audio/Plug-Ins/Components/Mirror Mirror.component")
-set(BUILD_COMPONENT "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/Debug/AU/Mirror Mirror.component")
+# Platform-specific VST3 install location
+if(APPLE)
+    set(USER_VST3_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/VST3")
+elseif(WIN32)
+    set(USER_VST3_DIR "$ENV{LOCALAPPDATA}/Programs/Common/VST3")
+else()  # Linux
+    set(USER_VST3_DIR "$ENV{HOME}/.vst3")
+endif()
 
-set(USER_COMPONENT_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/Components/Mirror Mirror.component")
+set(BUILD_VST3 "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/Debug/VST3/Mirror Mirror.vst3")
 
-add_custom_command(TARGET AIMusicPlugin_AU POST_BUILD
-    COMMAND python3 -c
-        "import plistlib; path='${BUILD_COMPONENT}/Contents/Info.plist';\
+add_custom_command(TARGET AIMusicPlugin_VST3 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "${USER_VST3_DIR}/Mirror Mirror.vst3"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${BUILD_VST3}" "${USER_VST3_DIR}/Mirror Mirror.vst3"
+    COMMENT "Installing VST3 to ${USER_VST3_DIR}"
+    VERBATIM
+)
+
+# AU: macOS only — patch Info.plist, re-sign, install to user Library
+if(APPLE)
+    set(BUILD_COMPONENT "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/Debug/AU/Mirror Mirror.component")
+    set(USER_COMPONENT_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/Components/Mirror Mirror.component")
+
+    add_custom_command(TARGET AIMusicPlugin_AU POST_BUILD
+        COMMAND python3 -c
+            "import plistlib; path='${BUILD_COMPONENT}/Contents/Info.plist';\
 f=open(path,'rb'); pl=plistlib.load(f); f.close();\
 [c.update({'sandboxSafe':True}) or c.pop('resourceUsage',None) for c in pl.get('AudioComponents',[])];\
 pl.setdefault('CFBundleSupportedPlatforms',['MacOSX']);\
 pl.setdefault('LSMinimumSystemVersion','10.13');\
 f=open(path,'wb'); plistlib.dump(pl,f); f.close(); print('Info.plist patched')"
-    COMMAND codesign --force --sign - "${BUILD_COMPONENT}"
-    COMMAND rm -rf "${USER_COMPONENT_DIR}"
-    COMMAND cp -r "${BUILD_COMPONENT}" "$ENV{HOME}/Library/Audio/Plug-Ins/Components/"
-    COMMENT "Patching, signing, and installing AU component to user Library"
-    VERBATIM
-)
-
-# Post-build: install VST3 to user library (keeps in sync after every rebuild)
-set(BUILD_VST3 "${CMAKE_CURRENT_BINARY_DIR}/AIMusicPlugin_artefacts/Debug/VST3/Mirror Mirror.vst3")
-set(USER_VST3_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/VST3")
-
-add_custom_command(TARGET AIMusicPlugin_VST3 POST_BUILD
-    COMMAND rm -rf "${USER_VST3_DIR}/Mirror Mirror.vst3"
-    COMMAND cp -r "${BUILD_VST3}" "${USER_VST3_DIR}/"
-    COMMENT "Installing VST3 to user Library"
-    VERBATIM
-)
+        COMMAND codesign --force --sign - "${BUILD_COMPONENT}"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "${USER_COMPONENT_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${BUILD_COMPONENT}" "${USER_COMPONENT_DIR}"
+        COMMENT "Patching, signing, and installing AU component to user Library"
+        VERBATIM
+    )
+endif()
