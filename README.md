@@ -21,10 +21,10 @@ Everything runs **locally** on your machine. The plugin talks to a small Python 
 
 | | |
 |---|---|
-| macOS 10.13+ | AU and VST3 formats |
+| macOS 10.13+ | required for AU format; VST3 also builds on Windows/Linux |
 | Python 3.10 | managed by the repo's `uv` venv |
 | CMake 3.22+ | `brew install cmake` |
-| Xcode Command Line Tools | `xcode-select --install` |
+| Xcode Command Line Tools | `xcode-select --install` (macOS only) |
 | JUCE 8.0.3 | installed at `~/JUCE` (see below) |
 
 ---
