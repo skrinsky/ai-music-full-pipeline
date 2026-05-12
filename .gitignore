@@ -15,6 +15,9 @@ __pycache__/
 planning/
 CLAUDE.md
 
+# release packaging output
+dist/
+
 # OS
 .DS_Store
 

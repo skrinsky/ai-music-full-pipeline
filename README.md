@@ -17,6 +17,14 @@ Everything runs **locally** on your machine. The plugin talks to a small Python 
 
 ---
 
+## Download
+
+Pre-built VST3 (Windows/Linux/macOS) and AU (macOS) are available on the [Releases page](../../releases). Download the zip for your format, unzip, and drop it in your DAW's plugin folder.
+
+To build from source instead, see [Installation](#installation) below.
+
+---
+
 ## Requirements
 
 | | |

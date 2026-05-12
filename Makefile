@@ -1,4 +1,4 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate pd pr pb pcfg prb pc pu pv disc-data disc-train disc-train-combined slakh-fetch slakh-stems nam-fetch
+.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate plugin-package pd pr pb pcfg prb pc pu pv disc-data disc-train disc-train-combined slakh-fetch slakh-stems nam-fetch
 .DEFAULT_GOAL := help
 
 VENV_DIR := .venv-ai-music
@@ -405,3 +405,7 @@ plugin-uninstall pu: ## Remove installed AU + VST3 from ~/Library/Audio/Plug-Ins
 
 plugin-validate pv: ## Validate the installed AU with auval (slow, ~30s)
 	auval -v aumu Aimp Smkr
+
+plugin-package: ## Build Release + zip artifacts + publish GitHub release (VERSION=v0.1.0 required)
+	@test -n "$(VERSION)" || { echo "Usage: make plugin-package VERSION=v0.1.0"; exit 1; }
+	scripts/package_release.sh "$(VERSION)" "$(NOTES)"
