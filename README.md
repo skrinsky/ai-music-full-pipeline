@@ -45,7 +45,7 @@ Custom install location:
 
 ### Build from source
 
-Requires Xcode Command Line Tools, cmake, and JUCE. See [Requirements](#requirements) below.
+Requires Xcode Command Line Tools and cmake. JUCE is fetched automatically by CMake on first build. See [Requirements](#requirements) below.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/skrinsky/mirror-mirror/main/install-dev.sh)
@@ -63,7 +63,7 @@ Pre-built VST3/AU zips are also available on the [Releases page](../../releases)
 | Python 3.10 | managed by the repo's `uv` venv |
 | CMake 3.22+ | `brew install cmake` |
 | Xcode Command Line Tools | `xcode-select --install` (macOS only) |
-| JUCE 8.0.3 | installed at `~/JUCE` on macOS/Linux, `%USERPROFILE%\JUCE` on Windows (see below) |
+| JUCE 8.0.3 | fetched automatically by CMake (via CPM) into `~/.cache/CPM` on first build |
 
 ---
 
@@ -88,23 +88,19 @@ git submodule update --init --recursive
 make setup
 ```
 
-Creates `.venv-ai-music/` with all pipeline dependencies. The server and all scripts use it automatically.
+Creates `.venv/` with all pipeline dependencies. The server and all scripts use it automatically.
 
-### 3 — Install JUCE
-
-Download **JUCE 8.0.3** from [juce.com/get-juce](https://juce.com/get-juce) and extract it to `~/JUCE`.
-
-```bash
-ls ~/JUCE/CMakeLists.txt   # should exist
-```
-
-### 4 — Build and install the plugin
+### 3 — Build and install the plugin
 
 ```bash
 cd plugin/AIMusicPlugin
 cmake -B build
 cmake --build build
 ```
+
+The first build fetches JUCE 8.0.3 via CPM into `~/.cache/CPM/`. Subsequent
+projects pinning the same JUCE tag reuse that cached clone. To override the
+cache location: `export CPM_SOURCE_CACHE=/your/path` before running cmake.
 
 This automatically installs:
 - `Mirror Mirror.component` -> `~/Library/Audio/Plug-Ins/Components/`
@@ -301,7 +297,7 @@ Rescan plugins in your DAW. Logic Pro: *Logic Pro -> Plug-in Manager -> Reset & 
 **Status stays "idle" / server not reachable**
 The plugin couldn't launch the server. Start it manually:
 ```bash
-source .venv-ai-music/bin/activate
+source .venv/bin/activate
 python plugin/server.py --root /path/to/ai-music-full-pipeline
 ```
 If it errors, make sure `make setup` completed successfully.
@@ -329,7 +325,7 @@ Then rescan.
 The full pipeline is also available as command-line tools driven by the top-level `Makefile`.
 
 ```bash
-source .venv-ai-music/bin/activate
+source .venv/bin/activate
 make help          # list every available target
 ```
 

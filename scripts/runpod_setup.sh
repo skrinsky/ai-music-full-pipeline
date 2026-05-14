@@ -26,7 +26,7 @@ echo "== RunPod training setup =="
 echo "ROOT_DIR: $ROOT_DIR"
 
 # ── Python venv ──────────────────────────────────────────
-VENV_DIR="$ROOT_DIR/.venv-ai-music"
+VENV_DIR="$ROOT_DIR/.venv"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if [[ ! -d "$VENV_DIR" ]]; then

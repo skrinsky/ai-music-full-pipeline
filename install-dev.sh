@@ -24,8 +24,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-JUCE_VERSION="8.0.3"
-JUCE_DIR="$HOME/JUCE"
 REPO_URL="https://github.com/skrinsky/mirror-mirror.git"
 
 # ── OS detection ──────────────────────────────────────────────────────────────
@@ -45,7 +43,6 @@ echo "  Mirror Mirror Installer"
 echo "  ========================"
 echo "  Platform : $OS $ARCH"
 echo "  Install  : $INSTALL_DIR"
-echo "  JUCE     : $JUCE_DIR"
 echo ""
 
 # ── macOS: Xcode CLT ──────────────────────────────────────────────────────────
@@ -111,23 +108,8 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 ok "Python $($PYTHON_BIN --version)"
 
-# ── JUCE ──────────────────────────────────────────────────────────────────────
-if [[ ! -d "$JUCE_DIR" ]]; then
-    info "Downloading JUCE $JUCE_VERSION to $JUCE_DIR..."
-    TMP_ZIP="$(mktemp /tmp/juce-XXXXXX.zip)"
-    if [[ "$PLATFORM" == "macos" ]]; then
-        JUCE_URL="https://github.com/juce-framework/JUCE/releases/download/${JUCE_VERSION}/juce-${JUCE_VERSION}-osx.zip"
-    else
-        JUCE_URL="https://github.com/juce-framework/JUCE/releases/download/${JUCE_VERSION}/juce-${JUCE_VERSION}-linux.zip"
-    fi
-    curl -fsSL "$JUCE_URL" -o "$TMP_ZIP"
-    TMP_DIR="$(mktemp -d)"
-    unzip -q "$TMP_ZIP" -d "$TMP_DIR"
-    mv "$TMP_DIR/JUCE" "$JUCE_DIR"
-    rm -f "$TMP_ZIP"
-    rm -rf "$TMP_DIR"
-fi
-ok "JUCE $JUCE_VERSION at $JUCE_DIR"
+# JUCE is fetched automatically by CMake via CPM on first plugin build
+# (cached at ~/.cache/CPM/, shared across projects pinning the same JUCE tag).
 
 # ── Clone repo ────────────────────────────────────────────────────────────────
 if [[ -d "$INSTALL_DIR/.git" ]]; then

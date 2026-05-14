@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_DIR="${ROOT_DIR}/.venv-ai-music"
+VENV_DIR="${ROOT_DIR}/.venv"
+VENV_PY="${VENV_DIR}/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-python3.10}"   # override if needed: PYTHON_BIN=/opt/homebrew/bin/python3.10
 
 PIPE_DIR="${ROOT_DIR}/vendor/all-in-one-ai-midi-pipeline"
@@ -14,6 +15,12 @@ echo "PYTHON_BIN: ${PYTHON_BIN}"
 echo "PIPE_DIR: ${PIPE_DIR}"
 echo
 
+if ! command -v uv &>/dev/null; then
+  echo "ERROR: uv not found. Install it first:"
+  echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+  exit 1
+fi
+
 if [[ ! -d "${PIPE_DIR}" ]]; then
   echo "ERROR: missing submodule folder: ${PIPE_DIR}"
   echo "Did you run: git submodule update --init --recursive ?"
@@ -23,18 +30,15 @@ fi
 # Create venv
 if [[ ! -d "${VENV_DIR}" ]]; then
   echo "== Creating venv =="
-  "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+  uv venv --python "${PYTHON_BIN}" "${VENV_DIR}"
 else
   echo "== Venv already exists =="
 fi
 
-# Activate
-# shellcheck disable=SC1090
-source "${VENV_DIR}/bin/activate"
-
+# setuptools is needed by torchcrepe and other pkg_resources users.
 echo
-echo "== Upgrading pip tooling =="
-python -m pip install -U pip setuptools wheel
+echo "== Installing setuptools =="
+uv pip install --python "${VENV_PY}" "setuptools<81"
 
 # ── Smart PyTorch installation ─────────────────────────────────────────────────
 # Detect platform and install the best available PyTorch build before anything
@@ -46,22 +50,23 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 TORCH_CMD=""
 TORCH_LABEL=""
+UV_PIP="uv pip install --python ${VENV_PY}"
 
 if [[ "$OS" == "Darwin" ]]; then
     MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
     if [[ "$ARCH" == "arm64" ]]; then
         if [[ "$MACOS_MAJOR" -ge 14 ]]; then
             TORCH_LABEL="Apple Silicon + macOS 14+ → latest PyTorch (MPS)"
-            TORCH_CMD="python -m pip install --upgrade torch torchaudio"
+            TORCH_CMD="${UV_PIP} --upgrade torch torchaudio"
         else
             # PyTorch ≥ 2.3 dropped MPS support for macOS 13; 2.2.x is the last
             # version that exposes MPS on Ventura.
             TORCH_LABEL="Apple Silicon + macOS 13 → PyTorch 2.2.x (MPS on Ventura)"
-            TORCH_CMD="python -m pip install 'torch==2.2.2' 'torchaudio==2.2.2'"
+            TORCH_CMD="${UV_PIP} 'torch==2.2.2' 'torchaudio==2.2.2'"
         fi
     else
         TORCH_LABEL="Intel Mac → latest PyTorch (CPU)"
-        TORCH_CMD="python -m pip install --upgrade torch torchaudio"
+        TORCH_CMD="${UV_PIP} --upgrade torch torchaudio"
     fi
 elif [[ "$OS" == "Linux" ]]; then
     if command -v nvidia-smi &>/dev/null 2>&1; then
@@ -79,15 +84,15 @@ elif [[ "$OS" == "Linux" ]]; then
             INDEX="https://download.pytorch.org/whl/cu118"
         fi
         TORCH_LABEL="Linux + NVIDIA CUDA ${CUDA_TAG} → PyTorch with ${INDEX##*/}"
-        TORCH_CMD="python -m pip install --upgrade torch torchaudio --index-url ${INDEX}"
+        TORCH_CMD="${UV_PIP} --upgrade torch torchaudio --index-url ${INDEX}"
     else
         TORCH_LABEL="Linux CPU → PyTorch CPU build"
-        TORCH_CMD="python -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cpu"
+        TORCH_CMD="${UV_PIP} --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cpu"
     fi
 else
     # Windows / unknown — let pip pick the default wheel
     TORCH_LABEL="Unknown platform → PyTorch default wheel"
-    TORCH_CMD="python -m pip install --upgrade torch torchaudio"
+    TORCH_CMD="${UV_PIP} --upgrade torch torchaudio"
 fi
 
 echo "  ${TORCH_LABEL}"
@@ -97,7 +102,7 @@ eval "${TORCH_CMD}"
 echo
 echo "== Installing top-level requirements (if present) =="
 if [[ -f "${ROOT_DIR}/requirements.txt" ]]; then
-  python -m pip install -r "${ROOT_DIR}/requirements.txt"
+  uv pip install --python "${VENV_PY}" -r "${ROOT_DIR}/requirements.txt"
 else
   echo "No ${ROOT_DIR}/requirements.txt found (skipping)."
 fi
@@ -109,7 +114,7 @@ if [[ -f "${PIPE_DIR}/requirements.txt" ]]; then
   # torchaudio / torchvision lines are kept as-is.
   TMPFILE="$(mktemp)"
   grep -vE '^torch([=<>!~ ]|$)' "${PIPE_DIR}/requirements.txt" > "${TMPFILE}" || true
-  python -m pip install -r "${TMPFILE}"
+  uv pip install --python "${VENV_PY}" -r "${TMPFILE}"
   rm -f "${TMPFILE}"
 else
   echo "No ${PIPE_DIR}/requirements.txt found (skipping)."
@@ -117,7 +122,7 @@ fi
 
 echo
 echo "== Sanity check =="
-python - <<'PY'
+"${VENV_PY}" - <<'PY'
 import sys
 print("python:", sys.executable)
 print("version:", sys.version.split()[0])

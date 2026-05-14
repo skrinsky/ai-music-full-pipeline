@@ -61,7 +61,7 @@ Write-Ok "Repo at $InstallDir"
 
 # ── Python environment ────────────────────────────────────────────────────────
 Write-Info "Setting up Python environment (this may take a few minutes)..."
-$VenvDir = "$InstallDir\.venv-ai-music"
+$VenvDir = "$InstallDir\.venv"
 
 if (-not (Test-Path $VenvDir)) {
     & $PythonBin -m venv $VenvDir

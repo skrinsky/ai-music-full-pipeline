@@ -3,12 +3,23 @@ project(AIMusicPlugin VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 
-if(WIN32)
-    set(JUCE_DIR "$ENV{USERPROFILE}/JUCE")
-else()
-    set(JUCE_DIR "$ENV{HOME}/JUCE")
+# Shared CPM cache across all projects that pin the same JUCE tag.
+# Override by exporting CPM_SOURCE_CACHE before invoking cmake.
+if(NOT DEFINED ENV{CPM_SOURCE_CACHE})
+    if(WIN32)
+        set(ENV{CPM_SOURCE_CACHE} "$ENV{LOCALAPPDATA}/CPM")
+    else()
+        set(ENV{CPM_SOURCE_CACHE} "$ENV{HOME}/.cache/CPM")
+    endif()
 endif()
-add_subdirectory(${JUCE_DIR} juce_build)
+
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/CPM.cmake)
+
+CPMAddPackage(
+    NAME JUCE
+    GITHUB_REPOSITORY juce-framework/JUCE
+    GIT_TAG 8.0.3
+)
 
 # AU is macOS-only; VST3 is cross-platform
 if(APPLE)

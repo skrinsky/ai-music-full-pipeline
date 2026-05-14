@@ -1,4 +1,4 @@
-# Finetuning dependencies — install into the existing .venv-ai-music:
+# Finetuning dependencies — install into the existing .venv:
 #   pip install -r finetune/requirements.txt
 #
 # MidiTok v2.x uses miditoolkit under the hood.

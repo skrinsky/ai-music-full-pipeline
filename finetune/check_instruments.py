@@ -44,7 +44,7 @@ def summarize_midi_dir(midi_dir: Path) -> None:
     except Exception as exc:
         raise RuntimeError(
             "pretty_midi is required for --midi_dir checks. "
-            "Activate .venv-ai-music first."
+            "Activate .venv first."
         ) from exc
 
     midi_files = sorted(midi_dir.glob("**/*.mid")) + sorted(midi_dir.glob("**/*.midi"))

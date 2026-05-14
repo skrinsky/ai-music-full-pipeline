@@ -152,7 +152,7 @@ void AIMusicProcessor::tryLaunchServerFromRepoRoot (const juce::File& repoRoot)
 
     auto q = [] (const juce::String& s) { return "\"" + s + "\""; };
 
-    auto activate = repoRoot.getChildFile (".venv-ai-music/bin/activate");
+    auto activate = repoRoot.getChildFile (".venv/bin/activate");
     juce::String shellCmd;
     if (activate.existsAsFile())
         shellCmd = ". " + q (activate.getFullPathName())

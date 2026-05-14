@@ -1,39 +1,54 @@
-.PHONY: help setup setup-force venv run clean blues-info blues-fetch gigamidi-info gigamidi-fetch blues-preprocess blues-train blues-resume blues-generate bg generate gen blues-audition blues-browse chorale-convert chorale-preprocess chorale-train chorale-resume chorale-retrain chorale-generate cg chorale-audition chorale-browse cascade-preprocess-a cascade-preprocess-b cascade-train cascade-generate cascade-eval chorale-cascade-preprocess chorale-cascade-train chorale-cascade-generate chorale-cascade-eval chorale-dense-preprocess chorale-dense-train chorale-dense-resume chorale-dense-generate cdg ft-install ft-convert ft-train ft-generate fg plugin-debug plugin-release plugin-build plugin-clean plugin-rebuild plugin-reconfigure plugin-uninstall plugin-validate plugin-package pd pr pb pcfg prb pc pu pv disc-data disc-train disc-train-combined slakh-fetch slakh-stems nam-fetch
 .DEFAULT_GOAL := help
 
-VENV_DIR := .venv-ai-music
+VENV_DIR := .venv
 ACTIVATE := $(VENV_DIR)/bin/activate
 PYTHON := $(VENV_DIR)/bin/python
 export PYTHONPATH := $(CURDIR)
 
+.PHONY: help
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+( [a-zA-Z_-]+)*:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
 
+.PHONY: setup
 setup: ## Create venv via uv (Python 3.10)
 	bash scripts/setup_venv.sh
 
+.PHONY: setup-force
 setup-force: ## Re-run venv setup (force reinstall)
 	PYTHON_BIN=$${PYTHON_BIN:-python3.10} bash scripts/setup_venv.sh
 
+.PHONY: venv
 venv: ## Print venv activation command
 	@echo "To activate:"
 	@echo "  source $(ACTIVATE)"
 
+.PHONY: run
 run: ## Run end-to-end pipeline (ARGS="--tracks drums,bass")
 	bash scripts/run_end_to_end.sh $(ARGS)
 
-clean: ## Remove venv + runs (keeps data/raw)
+.PHONY: clean
+clean: ## Remove build caches (plugin build dir + __pycache__); preserves venv, runs, data
+	rm -rf $(PLUGIN_BUILD_DIR)
+	find . -type d -name __pycache__ -not -path './vendor/*' -not -path './.venv/*' -exec rm -rf {} +
+	find . -type d -name '.pytest_cache' -not -path './vendor/*' -exec rm -rf {} +
+
+.PHONY: distclean
+distclean: clean ## DESTRUCTIVE: also remove venv + runs/ (all checkpoints, events, generated MIDI)
 	rm -rf $(VENV_DIR) runs
 
+.PHONY: blues-info
 blues-info: ## Show FMA blues track stats (metadata only)
 	$(PYTHON) scripts/fetch_fma_blues.py --info
 
+.PHONY: blues-fetch
 blues-fetch: ## Download FMA blues tracks into data/blues/
 	$(PYTHON) scripts/fetch_fma_blues.py $(ARGS)
 
+.PHONY: gigamidi-info
 gigamidi-info: ## Count GigaMIDI blues tracks (streaming, no download)
 	$(PYTHON) scripts/fetch_gigamidi_blues.py --info
 
+.PHONY: gigamidi-fetch
 gigamidi-fetch: ## Download GigaMIDI blues MIDIs into data/blues_midi/
 	$(PYTHON) scripts/fetch_gigamidi_blues.py $(ARGS)
 
@@ -47,15 +62,19 @@ data/blues_midi/.fetched:
 	$(PYTHON) scripts/fetch_gigamidi_blues.py --out_dir $(BLUES_MIDI)
 	@touch $@
 
+.PHONY: blues-audition
 blues-audition: data/blues_midi/.fetched ## Audition blues MIDIs (stats/list/info/play)
 	$(PYTHON) scripts/audition_gigamidi.py stats --folder $(BLUES_MIDI) $(ARGS)
 
+.PHONY: blues-browse
 blues-browse: data/blues_midi/.fetched ## Browse + play blues MIDIs (tkinter GUI)
 	$(PYTHON) scripts/midi_browser.py --folder $(BLUES_MIDI) $(ARGS)
 
+.PHONY: blues-preprocess
 blues-preprocess: data/blues_midi/.fetched ## Preprocess blues MIDIs → event tokens
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS) --blues_only $(ARGS)
 
+.PHONY: blues-train
 blues-train: $(BLUES_EVENTS)/events_train.pkl ## Train on preprocessed blues events
 	$(PYTHON) training/train.py \
 	  --data_dir $(BLUES_EVENTS) \
@@ -65,6 +84,7 @@ blues-train: $(BLUES_EVENTS)/events_train.pkl ## Train on preprocessed blues eve
 	  --save_path $(BLUES_CKPT) \
 	  --device auto $(ARGS)
 
+.PHONY: blues-resume
 blues-resume: $(BLUES_CKPT) ## Resume blues training from latest checkpoint
 	$(PYTHON) training/train.py \
 	  --data_dir $(BLUES_EVENTS) \
@@ -75,32 +95,39 @@ blues-resume: $(BLUES_CKPT) ## Resume blues training from latest checkpoint
 	  --resume $(BLUES_CKPT) \
 	  --device auto $(ARGS)
 
+.PHONY: blues-retrain
 blues-retrain: ## make blues-preprocess && make blues-train
 	make blues-preprocess && make blues-train
 
+.PHONY: slakh-fetch
 slakh-fetch: ## Download Slakh2100 MIDI stems from Zenodo (first N tracks; default N=100)
 	$(PYTHON) scripts/fetch_slakh.py --out_dir data/slakh --n_tracks 100 $(ARGS)
 
+.PHONY: slakh-stems
 slakh-stems: ## Fetch stems/ FLACs for already-downloaded Slakh tracks (streams full archive)
 	$(PYTHON) scripts/fetch_slakh.py --out_dir data/slakh --continue_stems $(ARGS)
 
 data/slakh/.fetched:
 	$(PYTHON) scripts/fetch_slakh.py --out_dir data/slakh --n_tracks 100 $(ARGS)
 
+.PHONY: nam-fetch
 nam-fetch: ## Download free NAM bass/guitar amp captures for discriminator training
 	$(PYTHON) scripts/fetch_nam_models.py --out_dir data/nam_models $(ARGS)
 
+.PHONY: disc-data
 disc-data: data/slakh/.fetched ## Build note discriminator HDF5 (scalars + mel patches)
 	$(PYTHON) scripts/build_discriminator_data.py \
 	  --slakh_dir data/slakh/train \
 	  --out runs/discriminator_data/notes.h5 $(ARGS)
 
+.PHONY: disc-train
 disc-train: runs/discriminator_data/notes.h5 ## Train scalar MLP discriminator
 	$(PYTHON) -m training.train_discriminator \
 	  --data runs/discriminator_data/notes.h5 \
 	  --out  runs/discriminator/model.pt \
 	  --epochs 60 $(ARGS)
 
+.PHONY: disc-train-combined
 disc-train-combined: runs/discriminator_data/notes.h5 ## Train combined CNN+MLP discriminator (needs spec_patches)
 	$(PYTHON) -m training.train_discriminator \
 	  --data runs/discriminator_data/notes.h5 \
@@ -110,6 +137,7 @@ disc-train-combined: runs/discriminator_data/notes.h5 ## Train combined CNN+MLP 
 $(BLUES_EVENTS)/events_train.pkl: data/blues_midi/.fetched
 	$(PYTHON) training/pre.py --midi_folder $(BLUES_MIDI) --data_folder $(BLUES_EVENTS)
 
+.PHONY: blues-generate bg
 blues-generate bg: $(BLUES_CKPT) ## Generate blues MIDI from trained model
 	$(PYTHON) training/generate.py \
 	  --ckpt $(BLUES_CKPT) \
@@ -130,19 +158,24 @@ data/chorales_midi/.converted:
 	  --npz $(CHORALE_NPZ) --out_dir $(CHORALE_MIDI) --bpm 100 --normalize-key
 	@touch $@
 
+.PHONY: chorale-convert
 chorale-convert: ## Convert Bach chorale NPZ → MIDI files
 	$(PYTHON) scripts/convert_chorales_npz_to_midi.py \
 	  --npz $(CHORALE_NPZ) --out_dir $(CHORALE_MIDI) --bpm 100 --normalize-key $(ARGS)
 
+.PHONY: chorale-audition
 chorale-audition: data/chorales_midi/.converted ## Audition chorale MIDIs (stats/list/info/play)
 	$(PYTHON) scripts/audition_gigamidi.py stats --folder $(CHORALE_MIDI) --instrument_set chorale4 $(ARGS)
 
+.PHONY: chorale-browse
 chorale-browse: data/chorales_midi/.converted ## Browse + play chorale MIDIs (tkinter GUI)
 	$(PYTHON) scripts/midi_browser.py --folder $(CHORALE_MIDI) $(ARGS)
 
+.PHONY: chorale-preprocess
 chorale-preprocess: data/chorales_midi/.converted ## Preprocess chorale MIDIs → event tokens
 	$(PYTHON) training/pre.py --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_EVENTS) --instrument_set chorale4 --seq_len 1024 $(ARGS)
 
+.PHONY: chorale-train
 chorale-train: $(CHORALE_EVENTS)/events_train.pkl ## Train on preprocessed chorale events
 	$(PYTHON) training/train.py \
 	  --data_dir $(CHORALE_EVENTS) \
@@ -153,6 +186,7 @@ chorale-train: $(CHORALE_EVENTS)/events_train.pkl ## Train on preprocessed chora
 	  --seq_len 1024 \
 	  --device auto $(ARGS)
 
+.PHONY: chorale-resume
 chorale-resume: $(CHORALE_CKPT) ## Resume chorale training from latest checkpoint
 	$(PYTHON) training/train.py \
 	  --data_dir $(CHORALE_EVENTS) \
@@ -163,12 +197,14 @@ chorale-resume: $(CHORALE_CKPT) ## Resume chorale training from latest checkpoin
 	  --resume $(CHORALE_CKPT) \
 	  --device auto $(ARGS)
 
+.PHONY: chorale-retrain
 chorale-retrain: ## make chorale-preprocess && make chorale-train
 	make chorale-preprocess && make chorale-train
 
 $(CHORALE_EVENTS)/events_train.pkl: data/chorales_midi/.converted
 	$(PYTHON) training/pre.py --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_EVENTS) --instrument_set chorale4 --seq_len 1024
 
+.PHONY: chorale-generate cg
 chorale-generate cg: $(CHORALE_CKPT) ## Generate chorale MIDI from trained model
 	$(PYTHON) training/generate.py \
 	  --ckpt $(CHORALE_CKPT) \
@@ -181,6 +217,7 @@ chorale-generate cg: $(CHORALE_CKPT) ## Generate chorale MIDI from trained model
 LATEST_CKPT = $(shell ls -t runs/checkpoints/*.pt 2>/dev/null | head -1)
 LATEST_VOCAB = $(shell ls -t runs/*/event_vocab.json 2>/dev/null | head -1)
 
+.PHONY: generate gen
 generate gen: ## Generate from latest checkpoint (ARGS="--seed_midi foo.mid --seed_bars 4")
 	@test -n "$(LATEST_CKPT)" || { echo "ERROR: no checkpoint found in runs/checkpoints/"; exit 1; }
 	@test -n "$(LATEST_VOCAB)" || { echo "ERROR: no event_vocab.json found in runs/"; exit 1; }
@@ -199,16 +236,19 @@ CASCADE_EVENTS_A := runs/cascade_events_a
 CASCADE_EVENTS_B := runs/cascade_events_b
 CASCADE_CKPT     := runs/checkpoints/cascade_model.pt
 
+.PHONY: cascade-preprocess-a
 cascade-preprocess-a: data/blues_midi/.fetched ## Cascade preprocess ablation A (6 stages)
 	$(PYTHON) training/pre_cascade.py \
 	  --midi_folder $(BLUES_MIDI) --data_folder $(CASCADE_EVENTS_A) \
 	  --ablation A --blues_only $(ARGS)
 
+.PHONY: cascade-preprocess-b
 cascade-preprocess-b: data/blues_midi/.fetched ## Cascade preprocess ablation B (5 stages, merged guitar+other)
 	$(PYTHON) training/pre_cascade.py \
 	  --midi_folder $(BLUES_MIDI) --data_folder $(CASCADE_EVENTS_B) \
 	  --ablation B --blues_only $(ARGS)
 
+.PHONY: cascade-train
 cascade-train: ## Train cascade model (set CASCADE_DIR=runs/cascade_events_a or _b)
 	@test -n "$(CASCADE_DIR)" || { echo "ERROR: set CASCADE_DIR (e.g. CASCADE_DIR=runs/cascade_events_a)"; exit 1; }
 	$(PYTHON) training/train_cascade.py \
@@ -219,6 +259,7 @@ cascade-train: ## Train cascade model (set CASCADE_DIR=runs/cascade_events_a or 
 	  --save_path $(CASCADE_CKPT) \
 	  --device auto $(ARGS)
 
+.PHONY: cascade-generate
 cascade-generate: $(CASCADE_CKPT) ## Generate from cascade model
 	@CASCADE_VOCAB=$$(ls -t runs/cascade_events_*/cascade_vocab.json 2>/dev/null | head -1); \
 	test -n "$$CASCADE_VOCAB" || { echo "ERROR: no cascade_vocab.json found"; exit 1; }; \
@@ -229,6 +270,7 @@ cascade-generate: $(CASCADE_CKPT) ## Generate from cascade model
 	  --out_midi runs/generated/cascade_out.mid \
 	  --device cpu $(ARGS)
 
+.PHONY: cascade-eval
 cascade-eval: ## Evaluate cascade-generated MIDI
 	@CASCADE_VOCAB=$$(ls -t runs/cascade_events_*/cascade_vocab.json 2>/dev/null | head -1); \
 	test -n "$$CASCADE_VOCAB" || { echo "ERROR: no cascade_vocab.json found"; exit 1; }; \
@@ -241,11 +283,13 @@ cascade-eval: ## Evaluate cascade-generated MIDI
 CHORALE_CASCADE_EVENTS := runs/chorale_cascade_events
 CHORALE_CASCADE_CKPT   := runs/checkpoints/chorale_cascade_model.pt
 
+.PHONY: chorale-cascade-preprocess
 chorale-cascade-preprocess: data/chorales_midi/.converted ## Cascade preprocess chorales (bassvox→tenor→alto→soprano)
 	$(PYTHON) training/pre_cascade.py \
 	  --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_CASCADE_EVENTS) \
 	  --ablation A --instrument_set chorale4 $(ARGS)
 
+.PHONY: chorale-cascade-train
 chorale-cascade-train: $(CHORALE_CASCADE_EVENTS)/cascade_train.pkl ## Train chorale cascade model
 	$(PYTHON) training/train_cascade.py \
 	  --data_dir $(CHORALE_CASCADE_EVENTS) \
@@ -260,6 +304,7 @@ $(CHORALE_CASCADE_EVENTS)/cascade_train.pkl: data/chorales_midi/.converted
 	  --midi_folder $(CHORALE_MIDI) --data_folder $(CHORALE_CASCADE_EVENTS) \
 	  --ablation A --instrument_set chorale4
 
+.PHONY: chorale-cascade-generate
 chorale-cascade-generate: $(CHORALE_CASCADE_CKPT) ## Generate chorale from cascade model
 	$(PYTHON) training/generate_cascade.py \
 	  --ckpt $(CHORALE_CASCADE_CKPT) \
@@ -268,6 +313,7 @@ chorale-cascade-generate: $(CHORALE_CASCADE_CKPT) ## Generate chorale from casca
 	  --device cpu --ablation A --instrument_set chorale4 \
 	  --max_notes_per_step 1 --force_grid_mode straight $(ARGS)
 
+.PHONY: chorale-cascade-eval
 chorale-cascade-eval: ## Evaluate chorale cascade-generated MIDI
 	$(PYTHON) training/eval_cascade.py \
 	  --midi runs/generated/chorale_cascade_out.mid \
@@ -279,16 +325,19 @@ chorale-cascade-eval: ## Evaluate chorale cascade-generated MIDI
 CHORALE_DENSE_EVENTS := runs/chorale_dense_events
 CHORALE_DENSE_CKPT   := runs/checkpoints/chorale_dense_model.pt
 
+.PHONY: chorale-dense-preprocess
 chorale-dense-preprocess: ## Dense preprocess: NPZ → compact token sequences
 	$(PYTHON) training/pre_chorale_dense.py \
 	  --npz $(CHORALE_NPZ) --data_folder $(CHORALE_DENSE_EVENTS) $(ARGS)
 
+.PHONY: chorale-dense-train
 chorale-dense-train: $(CHORALE_DENSE_EVENTS)/dense_train.pkl ## Train dense chorale Transformer
 	$(PYTHON) training/train_chorale_dense.py \
 	  --data_dir $(CHORALE_DENSE_EVENTS) \
 	  --save_path $(CHORALE_DENSE_CKPT) \
 	  --device auto $(ARGS)
 
+.PHONY: chorale-dense-resume
 chorale-dense-resume: $(CHORALE_DENSE_CKPT) ## Resume dense chorale training
 	$(PYTHON) training/train_chorale_dense.py \
 	  --data_dir $(CHORALE_DENSE_EVENTS) \
@@ -300,6 +349,7 @@ $(CHORALE_DENSE_EVENTS)/dense_train.pkl:
 	$(PYTHON) training/pre_chorale_dense.py \
 	  --npz $(CHORALE_NPZ) --data_folder $(CHORALE_DENSE_EVENTS)
 
+.PHONY: chorale-dense-generate cdg
 chorale-dense-generate cdg: $(CHORALE_DENSE_CKPT) ## Generate dense chorale MIDI
 	$(PYTHON) training/generate_chorale_dense.py \
 	  --ckpt $(CHORALE_DENSE_CKPT) \
@@ -318,14 +368,21 @@ FT_ADAPTER  := finetune/runs/adapter
 FT_GENERATED := finetune/runs/generated
 BASE_MODEL  := NathanFradet/Maestro-REMI-bpe20k
 
+.PHONY: ft-install
 ft-install: ## Install finetuning deps into the active venv
 	$(PYTHON) -m pip install -r finetune/requirements.txt
 
+.PHONY: ft-check
+ft-check: ## Inspect instrument distribution in finetune data (ARGS="--midi_dir summer_midi" for raw MIDI mode)
+	$(PYTHON) finetune/check_instruments.py --data_dir $(FT_DATA_DIR) $(ARGS)
+
+.PHONY: ft-convert
 ft-convert: ## Tokenize your MIDI files for finetuning (FT_MIDI_DIR=summer_midi)
 	$(PYTHON) finetune/convert.py \
 	  --midi_dir $(FT_MIDI_DIR) \
 	  --out_dir  $(FT_DATA_DIR) $(ARGS)
 
+.PHONY: ft-train
 ft-train: $(FT_DATA_DIR)/train_ids.npy ## LoRA-finetune from pre-trained music model
 	$(PYTHON) finetune/finetune.py \
 	  --data_dir   $(FT_DATA_DIR) \
@@ -333,6 +390,7 @@ ft-train: $(FT_DATA_DIR)/train_ids.npy ## LoRA-finetune from pre-trained music m
 	  --base_model $(BASE_MODEL) \
 	  --device auto $(ARGS)
 
+.PHONY: ft-generate fg
 ft-generate fg: $(FT_ADAPTER)/best ## Generate MIDI from finetuned model
 	$(PYTHON) finetune/generate.py \
 	  --base_model $(BASE_MODEL) \
@@ -368,14 +426,17 @@ PLUGIN_PRODUCT_NAME := $(shell sed -n 's/.*PRODUCT_NAME[[:space:]]*"\([^"]*\)".*
 # Past PRODUCT_NAMEs — `pu` also removes these so renames don't leave orphans.
 PLUGIN_LEGACY_NAMES := AI\ Music
 
+.PHONY: plugin-debug pd
 plugin-debug pd: ## Build AIMusicPlugin (Debug, AU + VST3, installs to ~/Library)
 	@$(MAKE) plugin-build PLUGIN_CONFIG=Debug
 
+.PHONY: plugin-release pr
 plugin-release pr: ## Build AIMusicPlugin (Release, AU + VST3, installs to ~/Library)
 	@$(MAKE) plugin-build PLUGIN_CONFIG=Release
 
-plugin-build pb: ## Configure (if needed) + build (set PLUGIN_CONFIG=Debug|Release, default Debug)
-	@PLUGIN_CONFIG=$${PLUGIN_CONFIG:-Debug}; \
+.PHONY: plugin-build pb
+plugin-build pb: ## Configure (if needed) + build (set PLUGIN_CONFIG=Debug|Release, default Release)
+	@PLUGIN_CONFIG=$${PLUGIN_CONFIG:-Release}; \
 	if [ ! -f $(PLUGIN_BUILD_DIR)/CMakeCache.txt ]; then \
 	  echo ">>> Configuring $(PLUGIN_DIR) ($$PLUGIN_CONFIG)"; \
 	  cmake -S $(PLUGIN_DIR) -B $(PLUGIN_BUILD_DIR) -DCMAKE_BUILD_TYPE=$$PLUGIN_CONFIG; \
@@ -383,15 +444,19 @@ plugin-build pb: ## Configure (if needed) + build (set PLUGIN_CONFIG=Debug|Relea
 	echo ">>> Building $(PLUGIN_DIR) ($$PLUGIN_CONFIG, j=$(PLUGIN_JOBS))"; \
 	cmake --build $(PLUGIN_BUILD_DIR) --config $$PLUGIN_CONFIG -j $(PLUGIN_JOBS)
 
-plugin-reconfigure pcfg: ## Force re-run cmake configure for the plugin
+.PHONY: plugin-reconfigure pcfg
+plugin-reconfigure pcfg: ## Force re-run cmake configure for the plugin (default Release)
 	rm -f $(PLUGIN_BUILD_DIR)/CMakeCache.txt
-	cmake -S $(PLUGIN_DIR) -B $(PLUGIN_BUILD_DIR) -DCMAKE_BUILD_TYPE=$${PLUGIN_CONFIG:-Debug}
+	cmake -S $(PLUGIN_DIR) -B $(PLUGIN_BUILD_DIR) -DCMAKE_BUILD_TYPE=$${PLUGIN_CONFIG:-Release}
 
-plugin-rebuild prb: plugin-clean plugin-debug ## Clean + rebuild (Debug)
+.PHONY: plugin-rebuild prb
+plugin-rebuild prb: plugin-clean plugin-release ## Clean + rebuild (Release)
 
+.PHONY: plugin-clean pc
 plugin-clean pc: ## Remove plugin build directory
 	rm -rf $(PLUGIN_BUILD_DIR)
 
+.PHONY: plugin-uninstall pu
 plugin-uninstall pu: ## Remove installed AU + VST3 from ~/Library/Audio/Plug-Ins (current + legacy names)
 	@test -n "$(PLUGIN_PRODUCT_NAME)" || { echo "ERROR: could not parse PRODUCT_NAME from $(PLUGIN_DIR)/CMakeLists.txt"; exit 1; }
 	@for name in "$(PLUGIN_PRODUCT_NAME)" $(PLUGIN_LEGACY_NAMES); do \
@@ -403,9 +468,11 @@ plugin-uninstall pu: ## Remove installed AU + VST3 from ~/Library/Audio/Plug-Ins
 	  fi; \
 	done
 
+.PHONY: plugin-validate pv
 plugin-validate pv: ## Validate the installed AU with auval (slow, ~30s)
 	auval -v aumu Aimp Smkr
 
+.PHONY: plugin-package
 plugin-package: ## Build Release + zip artifacts + publish GitHub release (VERSION=v0.1.0 required)
 	@test -n "$(VERSION)" || { echo "Usage: make plugin-package VERSION=v0.1.0"; exit 1; }
 	scripts/package_release.sh "$(VERSION)" "$(NOTES)"

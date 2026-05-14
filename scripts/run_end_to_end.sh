@@ -93,11 +93,7 @@ if [[ -n "$TRACKS" ]]; then
 fi
 
 pushd "$PIPE_DIR" >/dev/null
-
 python pipeline.py "${PIPE_ARGS[@]}"
-
-python pipeline.py export-midi --out "$MIDI_DIR"
-
 popd >/dev/null
 
 echo "=== [2/4] Export MIDIs to: $MIDI_DIR ==="

@@ -4,9 +4,6 @@ __pycache__/
 
 # virtual envs
 .venv/
-.venv-ai-midi/
-.venv-ai-music/
-.venv-train/
 
 # editor / tool state
 .claude/
@@ -14,6 +11,7 @@ __pycache__/
 # local planning / session notes (not for distribution)
 planning/
 CLAUDE.md
+TODO.md
 
 # release packaging output
 dist/
