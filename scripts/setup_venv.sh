@@ -108,12 +108,13 @@ else
 fi
 
 echo
-echo "== Installing vendored pipeline requirements (torch pin excluded) =="
+echo "== Installing vendored pipeline requirements (torch pins excluded) =="
 if [[ -f "${PIPE_DIR}/requirements.txt" ]]; then
-  # Strip the bare torch pin so our platform-chosen version isn't downgraded.
-  # torchaudio / torchvision lines are kept as-is.
+  # Strip torch / torchaudio / torchvision pins so the platform-chosen build
+  # above isn't downgraded. A bare torchaudio==X pin drags torch down with it,
+  # so all three must go. torchcrepe and other torch* packages are kept.
   TMPFILE="$(mktemp)"
-  grep -vE '^torch([=<>!~ ]|$)' "${PIPE_DIR}/requirements.txt" > "${TMPFILE}" || true
+  grep -vE '^(torch|torchaudio|torchvision)([=<>!~ ]|$)' "${PIPE_DIR}/requirements.txt" > "${TMPFILE}" || true
   uv pip install --python "${VENV_PY}" -r "${TMPFILE}"
   rm -f "${TMPFILE}"
 else
