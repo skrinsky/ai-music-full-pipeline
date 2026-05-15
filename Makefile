@@ -437,9 +437,16 @@ plugin-release pr: ## Build AIMusicPlugin (Release, AU + VST3, installs to ~/Lib
 .PHONY: plugin-build pb
 plugin-build pb: ## Configure (if needed) + build (set PLUGIN_CONFIG=Debug|Release, default Release)
 	@PLUGIN_CONFIG=$${PLUGIN_CONFIG:-Release}; \
-	if [ ! -f $(PLUGIN_BUILD_DIR)/CMakeCache.txt ]; then \
+	CACHE=$(PLUGIN_BUILD_DIR)/CMakeCache.txt; \
+	if [ ! -f $$CACHE ]; then \
 	  echo ">>> Configuring $(PLUGIN_DIR) ($$PLUGIN_CONFIG)"; \
 	  cmake -S $(PLUGIN_DIR) -B $(PLUGIN_BUILD_DIR) -DCMAKE_BUILD_TYPE=$$PLUGIN_CONFIG; \
+	else \
+	  CACHED=$$(sed -n 's/^CMAKE_BUILD_TYPE:[^=]*=//p' $$CACHE); \
+	  if [ -n "$$CACHED" ] && [ "$$CACHED" != "$$PLUGIN_CONFIG" ]; then \
+	    echo ">>> Reconfiguring $(PLUGIN_DIR): cached '$$CACHED' != requested '$$PLUGIN_CONFIG'"; \
+	    cmake -S $(PLUGIN_DIR) -B $(PLUGIN_BUILD_DIR) -DCMAKE_BUILD_TYPE=$$PLUGIN_CONFIG; \
+	  fi; \
 	fi; \
 	echo ">>> Building $(PLUGIN_DIR) ($$PLUGIN_CONFIG, j=$(PLUGIN_JOBS))"; \
 	cmake --build $(PLUGIN_BUILD_DIR) --config $$PLUGIN_CONFIG -j $(PLUGIN_JOBS)
